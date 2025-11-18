@@ -1,0 +1,28 @@
+# Git
+.git
+.gitignore
+
+# Build artifacts
+target/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment files
+.env
+.env.*
+
+# Documentation
+README.md
+LICENSE
+
+# Config files (will be mounted at runtime)
+config.json
+
+# Misc
+*.log
+.DS_Store
