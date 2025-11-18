@@ -1,0 +1,74 @@
+version: '3.8'
+
+services:
+  # MinIO S3-compatible storage backend
+  minio:
+    image: minio/minio:latest
+    container_name: replicat4-minio
+    ports:
+      - "9000:9000"      # API port
+      - "9001:9001"      # Web console
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - replicat4-net
+
+  # MinIO client to create bucket on startup
+  minio-init:
+    image: minio/mc:latest
+    container_name: replicat4-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set myminio http://minio:9000 minioadmin minioadmin;
+      mc mb myminio/replicat4 --ignore-existing;
+      mc anonymous set public myminio/replicat4;
+      exit 0;
+      "
+    networks:
+      - replicat4-net
+
+  # ReplicaT4 S3 proxy
+  replicat4:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: replicat4-proxy
+    pull_policy: build
+    ports:
+      - "3000:3000"
+    environment:
+      CONFIG_PATH: /app/config.json
+      PORT: 3000
+      RUST_LOG: replicat4=debug
+    volumes:
+      - ./config.json:/app/config.json:ro
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    networks:
+      - replicat4-net
+    healthcheck:
+      test: ["CMD", "pidof", "replicat4"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+networks:
+  replicat4-net:
+    driver: bridge
+
+volumes:
+  minio-data:
+    driver: local
