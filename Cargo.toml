@@ -4,3 +4,28 @@ version = "0.0.1"
 edition = "2024"
 
 [dependencies]
+axum = "~0.8"
+serde = { version = "~1.0", features = ["derive"] }
+tokio = { version = "~1.48", features = ["full"] }
+tracing = "~0.1"
+tracing-subscriber = { version = "~0.3", features = ["env-filter"] }
+
+# HTTP and body handling
+bytes = "~1.11"
+http = "~1.3"
+tower-http = { version = "~0.6", features = ["trace"] }
+
+# XML handling for S3 responses
+quick-xml = { version = "~0.38", features = ["serialize"] }
+
+# Cryptography for signatures and ETags
+sha2 = "~0.10"
+hex = "~0.4"
+hmac = "~0.12.1"
+
+# Date/time handling
+chrono = "~0.4"
+
+# Utilities
+uuid = { version = "~1.18", features = ["v4"] }
+async-trait = "~0.1"
