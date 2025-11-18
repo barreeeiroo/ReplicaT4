@@ -66,6 +66,14 @@ impl S3Error {
     }
 }
 
+impl std::fmt::Display for S3Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.error_code(), self.message())
+    }
+}
+
+impl std::error::Error for S3Error {}
+
 impl IntoResponse for S3Error {
     fn into_response(self) -> Response {
         let error_response = S3ErrorResponse {

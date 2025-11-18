@@ -1,6 +1,7 @@
-use super::backend::StorageBackend;
+use super::backend::{ObjectStream, StorageBackend};
 use crate::types::{ObjectMetadata, error::S3Error};
 use bytes::Bytes;
+use futures::stream;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -33,13 +34,18 @@ impl InMemoryStorage {
 
 #[async_trait::async_trait]
 impl StorageBackend for InMemoryStorage {
-    async fn get_object(&self, key: &str) -> Result<Bytes, S3Error> {
+    async fn get_object(&self, key: &str) -> Result<(ObjectStream, ObjectMetadata), S3Error> {
         let objects = self.objects.read().await;
 
-        objects
-            .get(key)
-            .map(|obj| obj.data.clone())
-            .ok_or(S3Error::NoSuchKey)
+        let obj = objects.get(key).ok_or(S3Error::NoSuchKey)?;
+
+        let data = obj.data.clone();
+        let metadata = obj.metadata.clone();
+
+        // Convert Bytes to a stream with a single item
+        let stream = Box::pin(stream::once(async { Ok(data) }));
+
+        Ok((stream, metadata))
     }
 
     async fn put_object(&self, key: &str, data: Bytes) -> Result<String, S3Error> {

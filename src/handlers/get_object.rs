@@ -4,10 +4,12 @@ use crate::{
 };
 use axum::{
     Extension,
+    body::Body,
     extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use futures::TryStreamExt;
 
 /// GET /{bucket_name}/{key} - Get an object
 pub async fn get_object(
@@ -19,9 +21,13 @@ pub async fn get_object(
     let bucket = &app_state.bucket_name;
     tracing::info!("GET object: bucket={}, key={}", bucket, key);
 
-    // Retrieve object from storage
-    let data = storage.get_object(&key).await?;
-    let metadata = storage.head_object(&key).await?;
+    // Retrieve object stream and metadata from storage in a single call
+    let (stream, metadata) = storage.get_object(&key).await?;
+
+    // Convert our stream to axum Body
+    // The stream yields Result<Bytes, S3Error>, we need to map errors to std::io::Error for Body
+    let body_stream = stream.map_err(|e| std::io::Error::other(e.to_string()));
+    let body = Body::from_stream(body_stream);
 
     // Build response with S3 headers
     Ok((
@@ -35,7 +41,7 @@ pub async fn get_object(
             ),
             ("content-length", metadata.size.to_string()),
         ],
-        data,
+        body,
     )
         .into_response())
 }

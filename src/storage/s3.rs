@@ -1,8 +1,10 @@
-use crate::storage::backend::StorageBackend;
+use crate::storage::backend::{ObjectStream, StorageBackend};
 use crate::types::{ObjectMetadata, error::S3Error};
 use aws_sdk_s3::Client as S3Client;
 use aws_sdk_s3::primitives::ByteStream;
 use bytes::Bytes;
+use futures::stream::StreamExt;
+use http_body_util::BodyExt;
 use sha2::{Digest, Sha256};
 
 pub struct S3Backend {
@@ -12,6 +14,35 @@ pub struct S3Backend {
 }
 
 impl S3Backend {
+    /// Helper function to extract metadata from AWS SDK response
+    fn extract_metadata(
+        key: &str,
+        content_length: Option<i64>,
+        etag: Option<&str>,
+        last_modified: Option<&aws_sdk_s3::primitives::DateTime>,
+        content_type: Option<&str>,
+    ) -> ObjectMetadata {
+        let size = content_length.unwrap_or(0) as u64;
+        let etag = etag.map(|s| s.to_string()).unwrap_or_default();
+        let last_modified = last_modified
+            .and_then(|dt| {
+                let secs = dt.secs();
+                chrono::DateTime::from_timestamp(secs, 0)
+            })
+            .unwrap_or_else(chrono::Utc::now);
+        let content_type = content_type
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "binary/octet-stream".to_string());
+
+        ObjectMetadata {
+            key: key.to_string(),
+            size,
+            etag,
+            last_modified,
+            content_type,
+        }
+    }
+
     pub async fn new(
         name: String,
         bucket: String,
@@ -66,7 +97,7 @@ impl S3Backend {
 
 #[async_trait::async_trait]
 impl StorageBackend for S3Backend {
-    async fn get_object(&self, key: &str) -> Result<Bytes, S3Error> {
+    async fn get_object(&self, key: &str) -> Result<(ObjectStream, ObjectMetadata), S3Error> {
         tracing::debug!("[{}] Getting object: {}", self.name, key);
 
         let result = self
@@ -79,11 +110,27 @@ impl StorageBackend for S3Backend {
 
         match result {
             Ok(output) => {
-                let data = output.body.collect().await.map_err(|e| {
-                    tracing::error!("[{}] Failed to read object body: {}", self.name, e);
-                    S3Error::InternalError(format!("Failed to read object: {}", e))
-                })?;
-                Ok(data.into_bytes())
+                // Extract metadata from the response
+                let metadata = Self::extract_metadata(
+                    key,
+                    output.content_length(),
+                    output.e_tag(),
+                    output.last_modified(),
+                    output.content_type(),
+                );
+
+                let name = self.name.clone();
+                // Convert AWS ByteStream to our generic stream
+                // ByteStream wraps an SdkBody which can be converted to a stream of frames
+                let body = output.body.into_inner();
+                let stream = body.into_data_stream().map(move |result| {
+                    result.map_err(|e| {
+                        tracing::error!("[{}] Failed to read object chunk: {}", name, e);
+                        S3Error::InternalError(format!("Failed to read object: {}", e))
+                    })
+                });
+
+                Ok((Box::pin(stream), metadata))
             }
             Err(_err) => {
                 tracing::warn!("[{}] Object not found: {}", self.name, key);
@@ -164,31 +211,14 @@ impl StorageBackend for S3Backend {
 
         match result {
             Ok(output) => {
-                let size = output.content_length().unwrap_or(0) as u64;
-                let etag = output
-                    .e_tag()
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "".to_string());
-                let last_modified = output
-                    .last_modified()
-                    .and_then(|dt| {
-                        // Convert AWS DateTime to chrono DateTime
-                        let secs = dt.secs();
-                        chrono::DateTime::from_timestamp(secs, 0)
-                    })
-                    .unwrap_or_else(chrono::Utc::now);
-                let content_type = output
-                    .content_type()
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "binary/octet-stream".to_string());
-
-                Ok(ObjectMetadata {
-                    key: key.to_string(),
-                    size,
-                    etag,
-                    last_modified,
-                    content_type,
-                })
+                let metadata = Self::extract_metadata(
+                    key,
+                    output.content_length(),
+                    output.e_tag(),
+                    output.last_modified(),
+                    output.content_type(),
+                );
+                Ok(metadata)
             }
             Err(_) => {
                 tracing::warn!("[{}] Object not found: {}", self.name, key);
