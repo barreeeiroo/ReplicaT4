@@ -176,8 +176,9 @@ fn build_canonical_request(
     // Canonical URI (path)
     let uri = request.uri().path();
 
-    // Canonical query string
-    let query = request.uri().query().unwrap_or("");
+    // Canonical query string (must be sorted and properly encoded)
+    let raw_query = request.uri().query().unwrap_or("");
+    let canonical_query = canonicalize_query_string(raw_query);
 
     // Canonical headers
     let canonical_headers = build_canonical_headers(request.headers(), signed_headers);
@@ -195,8 +196,45 @@ fn build_canonical_request(
 
     Ok(format!(
         "{}\n{}\n{}\n{}\n{}\n{}",
-        method, uri, query, canonical_headers, signed_headers_str, content_hash
+        method, uri, canonical_query, canonical_headers, signed_headers_str, content_hash
     ))
+}
+
+/// Canonicalize query string according to AWS SigV4 spec
+/// Parameters must be sorted by name. The query string we receive is already percent-encoded,
+/// so we preserve that encoding and just sort the parameters.
+fn canonicalize_query_string(query: &str) -> String {
+    if query.is_empty() {
+        return String::new();
+    }
+
+    // Parse query parameters - keep them as-is (already percent-encoded)
+    let mut params: Vec<(&str, &str)> = query
+        .split('&')
+        .filter_map(|param| {
+            if let Some((key, value)) = param.split_once('=') {
+                Some((key, value))
+            } else {
+                // Handle key without value
+                Some((param, ""))
+            }
+        })
+        .collect();
+
+    // Sort by key name (then by value if keys are equal)
+    params.sort_by(|a, b| {
+        match a.0.cmp(&b.0) {
+            std::cmp::Ordering::Equal => a.1.cmp(&b.1),
+            other => other,
+        }
+    });
+
+    // Build canonical query string - use values as-is since they're already encoded
+    params
+        .iter()
+        .map(|(key, value)| format!("{}={}", key, value))
+        .collect::<Vec<_>>()
+        .join("&")
 }
 
 /// Build canonical headers string
@@ -206,11 +244,14 @@ fn build_canonical_headers(headers: &HeaderMap, signed_headers: &[String]) -> St
     for header_name in signed_headers {
         if let Some(value) = headers.get(header_name) {
             if let Ok(value_str) = value.to_str() {
+                let trimmed = value_str.trim();
                 canonical.push_str(header_name);
                 canonical.push(':');
-                canonical.push_str(value_str.trim());
+                canonical.push_str(trimmed);
                 canonical.push('\n');
             }
+        } else {
+            tracing::warn!("Signed header '{}' not found in request headers", header_name);
         }
     }
 
