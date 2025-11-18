@@ -1,5 +1,5 @@
 use super::backend::StorageBackend;
-use crate::types::{error::S3Error, ObjectMetadata};
+use crate::types::{ObjectMetadata, error::S3Error};
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -53,10 +53,7 @@ impl StorageBackend for InMemoryStorage {
             content_type: "binary/octet-stream".to_string(),
         };
 
-        let stored_object = StoredObject {
-            data,
-            metadata,
-        };
+        let stored_object = StoredObject { data, metadata };
 
         let mut objects = self.objects.write().await;
         objects.insert(key.to_string(), stored_object);
@@ -92,9 +89,10 @@ impl StorageBackend for InMemoryStorage {
             .iter()
             .filter_map(|(key, obj)| {
                 if let Some(prefix_str) = prefix
-                    && !key.starts_with(prefix_str) {
-                        return None;
-                    }
+                    && !key.starts_with(prefix_str)
+                {
+                    return None;
+                }
 
                 Some(obj.metadata.clone())
             })

@@ -10,7 +10,11 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(storage: Arc<dyn StorageBackend>, credentials: CredentialsStore, bucket_name: String) -> Self {
+    pub fn new(
+        storage: Arc<dyn StorageBackend>,
+        credentials: CredentialsStore,
+        bucket_name: String,
+    ) -> Self {
         Self {
             storage,
             credentials,

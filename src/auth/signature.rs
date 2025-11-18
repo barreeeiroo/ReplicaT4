@@ -1,4 +1,4 @@
-use crate::types::{error::S3Error, Credentials};
+use crate::types::{Credentials, error::S3Error};
 use axum::{body::Body, extract::Request, http::HeaderMap};
 
 /// Parsed authorization header information
@@ -60,10 +60,8 @@ pub fn parse_authorization_header(header: &str) -> Result<AuthorizationInfo, S3E
     let access_key_id = credential_parts[0].to_string();
     let credential_scope = credential_parts[1..].join("/");
 
-    let signed_headers_vec: Vec<String> = signed_headers
-        .split(';')
-        .map(|s| s.to_string())
-        .collect();
+    let signed_headers_vec: Vec<String> =
+        signed_headers.split(';').map(|s| s.to_string()).collect();
 
     Ok(AuthorizationInfo {
         access_key_id,
@@ -92,27 +90,24 @@ pub fn verify_signature(
     let content_hash = headers
         .get("x-amz-content-sha256")
         .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| S3Error::InvalidRequest("Missing x-amz-content-sha256 header".to_string()))?;
+        .ok_or_else(|| {
+            S3Error::InvalidRequest("Missing x-amz-content-sha256 header".to_string())
+        })?;
 
     // Validate timestamp (allow 15 minute skew)
     validate_timestamp(amz_date)?;
 
     // Build canonical request
-    let canonical_request = build_canonical_request(
-        request,
-        &auth_info.signed_headers,
-        content_hash,
-    )?;
+    let canonical_request =
+        build_canonical_request(request, &auth_info.signed_headers, content_hash)?;
 
     // Build string to sign
-    let string_to_sign = build_string_to_sign(&canonical_request, amz_date, &auth_info.credential_scope);
+    let string_to_sign =
+        build_string_to_sign(&canonical_request, amz_date, &auth_info.credential_scope);
 
     // Calculate signature
-    let calculated_signature = calculate_signature(
-        &credentials.secret_access_key,
-        amz_date,
-        &string_to_sign,
-    )?;
+    let calculated_signature =
+        calculate_signature(&credentials.secret_access_key, amz_date, &string_to_sign)?;
 
     // Compare signatures
     if calculated_signature != auth_info.signature {
@@ -129,7 +124,7 @@ pub fn verify_signature(
 
 /// Validate that the timestamp is within acceptable range
 fn validate_timestamp(date_str: &str) -> Result<(), S3Error> {
-    use chrono::{DateTime, NaiveDateTime, Utc, Duration};
+    use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 
     // Try parsing as x-amz-date format first (20251118T195229Z)
     let request_time = if date_str.ends_with('Z') && date_str.len() == 16 {
@@ -222,11 +217,9 @@ fn canonicalize_query_string(query: &str) -> String {
         .collect();
 
     // Sort by key name (then by value if keys are equal)
-    params.sort_by(|a, b| {
-        match a.0.cmp(b.0) {
-            std::cmp::Ordering::Equal => a.1.cmp(b.1),
-            other => other,
-        }
+    params.sort_by(|a, b| match a.0.cmp(b.0) {
+        std::cmp::Ordering::Equal => a.1.cmp(b.1),
+        other => other,
     });
 
     // Build canonical query string - use values as-is since they're already encoded
@@ -251,7 +244,10 @@ fn build_canonical_headers(headers: &HeaderMap, signed_headers: &[String]) -> St
                 canonical.push('\n');
             }
         } else {
-            tracing::warn!("Signed header '{}' not found in request headers", header_name);
+            tracing::warn!(
+                "Signed header '{}' not found in request headers",
+                header_name
+            );
         }
     }
 

@@ -1,12 +1,12 @@
 use crate::{
     app_state::AppState,
-    types::{error::S3Error, AuthContext, ListBucketResult, S3Object},
+    types::{AuthContext, ListBucketResult, S3Object, error::S3Error},
 };
 use axum::{
+    Extension,
     extract::{Query, State},
     http::StatusCode,
     response::IntoResponse,
-    Extension,
 };
 use quick_xml::se::to_string as to_xml_string;
 use serde::Deserialize;
@@ -29,7 +29,11 @@ pub async fn list_objects(
 ) -> Result<impl IntoResponse, S3Error> {
     let storage = &app_state.storage;
     let bucket = &app_state.bucket_name;
-    tracing::info!("LIST objects: bucket={}, prefix={:?}", bucket, params.prefix);
+    tracing::info!(
+        "LIST objects: bucket={}, prefix={:?}",
+        bucket,
+        params.prefix
+    );
 
     let max_keys = params.max_keys.unwrap_or(1000).min(1000);
     let prefix = params.prefix.as_deref();

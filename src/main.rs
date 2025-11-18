@@ -5,16 +5,16 @@ mod storage;
 mod types;
 
 use app_state::AppState;
-use auth::{auth_middleware, CredentialsStore};
+use auth::{CredentialsStore, auth_middleware};
 use handlers::{delete_object, get_object, head_object, list_objects, not_found, put_object};
 use storage::{InMemoryStorage, StorageBackend};
 use types::Credentials;
 
 use axum::{
+    Router,
     extract::Request,
     middleware::{self, Next},
     routing::get,
-    Router,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -35,12 +35,12 @@ async fn main() {
     tracing_subscriber::fmt::init();
 
     // Load configuration from environment variables or use defaults
-    let access_key_id = std::env::var("AWS_ACCESS_KEY_ID")
-        .unwrap_or_else(|_| DEFAULT_ACCESS_KEY_ID.to_string());
+    let access_key_id =
+        std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_else(|_| DEFAULT_ACCESS_KEY_ID.to_string());
     let secret_access_key = std::env::var("AWS_SECRET_ACCESS_KEY")
         .unwrap_or_else(|_| DEFAULT_SECRET_ACCESS_KEY.to_string());
-    let bucket_name = std::env::var("BUCKET_NAME")
-        .unwrap_or_else(|_| DEFAULT_BUCKET_NAME.to_string());
+    let bucket_name =
+        std::env::var("BUCKET_NAME").unwrap_or_else(|_| DEFAULT_BUCKET_NAME.to_string());
 
     tracing::info!("Using bucket: {}", bucket_name);
     tracing::info!("Using access key: {}", access_key_id);
@@ -91,13 +91,19 @@ async fn main() {
 
     // Start server
     let addr = format!("{}:{}", HOST, PORT);
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .unwrap();
+    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
 
-    tracing::info!("S3-compatible API server listening on {}", listener.local_addr().unwrap());
+    tracing::info!(
+        "S3-compatible API server listening on {}",
+        listener.local_addr().unwrap()
+    );
     tracing::info!("Configured bucket: {}", bucket_name);
-    tracing::info!("Example: aws s3 --endpoint-url http://{}:{} ls s3://{}/", HOST, PORT, bucket_name);
+    tracing::info!(
+        "Example: aws s3 --endpoint-url http://{}:{} ls s3://{}/",
+        HOST,
+        PORT,
+        bucket_name
+    );
 
     axum::serve(listener, app).await.unwrap();
 }

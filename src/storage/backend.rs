@@ -1,4 +1,4 @@
-use crate::types::{error::S3Error, ObjectMetadata};
+use crate::types::{ObjectMetadata, error::S3Error};
 use bytes::Bytes;
 
 /// Storage backend trait - implement this for different storage backends

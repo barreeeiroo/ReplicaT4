@@ -1,12 +1,12 @@
 use crate::{
     app_state::AppState,
-    types::{error::S3Error, AuthContext},
+    types::{AuthContext, error::S3Error},
 };
 use axum::{
+    Extension,
     extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    Extension,
 };
 
 /// HEAD /{bucket_name}/{key} - Get object metadata

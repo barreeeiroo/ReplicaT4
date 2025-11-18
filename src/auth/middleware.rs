@@ -1,5 +1,8 @@
-use crate::{app_state::AppState, types::{error::S3Error, AuthContext}};
 use super::signature::{parse_authorization_header, verify_signature};
+use crate::{
+    app_state::AppState,
+    types::{AuthContext, error::S3Error},
+};
 use axum::{
     extract::Request,
     middleware::Next,
@@ -8,11 +11,7 @@ use axum::{
 
 /// AWS Signature V4 authentication middleware
 /// Note: app_state must be captured in a closure when creating the middleware layer
-pub async fn auth_middleware(
-    app_state: AppState,
-    mut request: Request,
-    next: Next,
-) -> Response {
+pub async fn auth_middleware(app_state: AppState, mut request: Request, next: Next) -> Response {
     // Extract the Authorization header
     let auth_header = match request
         .headers()

@@ -1,12 +1,12 @@
 use crate::{
     app_state::AppState,
-    types::{error::S3Error, AuthContext},
+    types::{AuthContext, error::S3Error},
 };
 use axum::{
+    Extension,
     extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    Extension,
 };
 
 /// GET /{bucket_name}/{key} - Get an object
@@ -31,10 +31,7 @@ pub async fn get_object(
             ("etag", metadata.etag.clone()),
             (
                 "last-modified",
-                metadata
-                    .last_modified
-                    .to_rfc2822()
-                    .replace("+0000", "GMT"),
+                metadata.last_modified.to_rfc2822().replace("+0000", "GMT"),
             ),
             ("content-length", metadata.size.to_string()),
         ],
