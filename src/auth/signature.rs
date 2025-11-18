@@ -211,20 +211,20 @@ fn canonicalize_query_string(query: &str) -> String {
     // Parse query parameters - keep them as-is (already percent-encoded)
     let mut params: Vec<(&str, &str)> = query
         .split('&')
-        .filter_map(|param| {
+        .map(|param| {
             if let Some((key, value)) = param.split_once('=') {
-                Some((key, value))
+                (key, value)
             } else {
                 // Handle key without value
-                Some((param, ""))
+                (param, "")
             }
         })
         .collect();
 
     // Sort by key name (then by value if keys are equal)
     params.sort_by(|a, b| {
-        match a.0.cmp(&b.0) {
-            std::cmp::Ordering::Equal => a.1.cmp(&b.1),
+        match a.0.cmp(b.0) {
+            std::cmp::Ordering::Equal => a.1.cmp(b.1),
             other => other,
         }
     });

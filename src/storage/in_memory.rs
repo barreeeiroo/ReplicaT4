@@ -91,11 +91,10 @@ impl StorageBackend for InMemoryStorage {
         let mut results: Vec<ObjectMetadata> = objects
             .iter()
             .filter_map(|(key, obj)| {
-                if let Some(prefix_str) = prefix {
-                    if !key.starts_with(prefix_str) {
+                if let Some(prefix_str) = prefix
+                    && !key.starts_with(prefix_str) {
                         return None;
                     }
-                }
 
                 Some(obj.metadata.clone())
             })

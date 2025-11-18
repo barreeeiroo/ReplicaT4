@@ -1,0 +1,11 @@
+# Clippy configuration for ReplicaT4
+
+# Deny pedantic warnings to catch common mistakes
+# You can adjust these based on your preferences
+
+# Warn on missing documentation
+# warn-on-missing-docs = true
+
+# Additional lints to consider enabling:
+# cognitive-complexity-threshold = 30
+# too-many-lines-threshold = 100
