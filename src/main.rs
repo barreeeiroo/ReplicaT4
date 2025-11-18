@@ -24,7 +24,7 @@ use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 
 // Server configuration
-const HOST: &str = "127.0.0.1";
+const HOST: &str = "0.0.0.0";
 const PORT: u16 = 3000;
 
 // Default configuration values
@@ -40,6 +40,10 @@ struct Cli {
     /// Path to the configuration file (required)
     #[arg(short, long, env = "CONFIG_PATH")]
     config: String,
+
+    /// Host to bind to
+    #[arg(long, env = "HOST", default_value = HOST)]
+    host: String,
 
     /// Port to listen on
     #[arg(short, long, env = "PORT", default_value_t = PORT)]
@@ -186,7 +190,7 @@ async fn main() {
         .layer(TraceLayer::new_for_http());
 
     // Start server
-    let addr = format!("{}:{}", HOST, cli.port);
+    let addr = format!("{}:{}", cli.host, cli.port);
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
 
     tracing::info!(
@@ -195,8 +199,7 @@ async fn main() {
     );
     tracing::info!("Configured bucket: {}", bucket_name);
     tracing::info!(
-        "Example: aws s3 --endpoint-url http://{}:{} ls s3://{}/",
-        HOST,
+        "Example: aws s3 --endpoint-url http://localhost:{} ls s3://{}/",
         cli.port,
         bucket_name
     );
