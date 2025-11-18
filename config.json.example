@@ -1,0 +1,30 @@
+{
+  "backends": [
+    {
+      "name": "aws-s3-primary",
+      "type": "s3",
+      "region": "us-east-1",
+      "bucket": "my-primary-bucket"
+    },
+    {
+      "name": "minio-local",
+      "type": "s3",
+      "region": "us-east-1",
+      "bucket": "replicat4",
+      "endpoint": "http://localhost:9000",
+      "force_path_style": true,
+      "access_key_id": "minioadmin",
+      "secret_access_key": "minioadmin"
+    },
+    {
+      "name": "digitalocean-spaces",
+      "type": "s3",
+      "region": "nyc3",
+      "bucket": "my-space-name",
+      "endpoint": "https://nyc3.digitaloceanspaces.com",
+      "force_path_style": false,
+      "access_key_id": "YOUR_SPACES_KEY",
+      "secret_access_key": "YOUR_SPACES_SECRET"
+    }
+  ]
+}

@@ -1,13 +1,15 @@
 mod app_state;
 mod auth;
+mod config;
 mod handlers;
 mod storage;
 mod types;
 
 use app_state::AppState;
 use auth::{CredentialsStore, auth_middleware};
+use config::{BackendConfig, Config};
 use handlers::{delete_object, get_object, head_object, list_objects, not_found, put_object};
-use storage::{InMemoryStorage, StorageBackend};
+use storage::{InMemoryStorage, S3Backend, StorageBackend};
 use types::Credentials;
 
 use axum::{
@@ -45,8 +47,84 @@ async fn main() {
     tracing::info!("Using bucket: {}", bucket_name);
     tracing::info!("Using access key: {}", access_key_id);
 
-    // Create storage backend
-    let storage: Arc<dyn StorageBackend> = Arc::new(InMemoryStorage::new());
+    // Load backend configuration from file
+    let config_path = std::env::var("CONFIG_PATH").unwrap_or_else(|_| "config.json".to_string());
+    let config = match Config::from_file(&config_path) {
+        Ok(cfg) => {
+            tracing::info!("Loaded configuration from {}", config_path);
+            cfg
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Failed to load config file '{}': {}. Using in-memory storage.",
+                config_path,
+                e
+            );
+            Config {
+                backends: vec![BackendConfig::Memory(config::MemoryBackendConfig {
+                    name: "default-memory".to_string(),
+                })],
+            }
+        }
+    };
+
+    // Initialize backends from configuration
+    let mut backends: Vec<Arc<dyn StorageBackend>> = Vec::new();
+
+    for backend_config in config.backends {
+        match backend_config {
+            BackendConfig::S3(s3_config) => {
+                tracing::info!("Initializing S3 backend: {}", s3_config.name);
+                match S3Backend::new(
+                    s3_config.name.clone(),
+                    s3_config.bucket,
+                    s3_config.region,
+                    s3_config.endpoint,
+                    s3_config.force_path_style,
+                    s3_config.access_key_id,
+                    s3_config.secret_access_key,
+                )
+                .await
+                {
+                    Ok(backend) => {
+                        tracing::info!(
+                            "✓ S3 backend '{}' initialized successfully",
+                            s3_config.name
+                        );
+                        backends.push(Arc::new(backend));
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "✗ Failed to initialize S3 backend '{}': {}",
+                            s3_config.name,
+                            e
+                        );
+                    }
+                }
+            }
+            BackendConfig::Memory(mem_config) => {
+                tracing::info!("Initializing in-memory backend: {}", mem_config.name);
+                backends.push(Arc::new(InMemoryStorage::new()));
+                tracing::info!("✓ In-memory backend '{}' initialized", mem_config.name);
+            }
+        }
+    }
+
+    if backends.is_empty() {
+        tracing::error!("No backends configured! Exiting.");
+        std::process::exit(1);
+    }
+
+    // Create storage backend (with replication if multiple backends)
+    let storage: Arc<dyn StorageBackend> = if backends.len() == 1 {
+        tracing::info!("Using single backend (no replication)");
+        backends.into_iter().next().unwrap()
+    } else {
+        tracing::info!("Using single backend (no replication)");
+        // tracing::info!("Using multi-backend replication with {} backends", backends.len());
+        // Arc::new(MultiBackend::new(backends))
+        backends.into_iter().next().unwrap()
+    };
 
     // Create credentials store
     let mut credentials_map = HashMap::new();
