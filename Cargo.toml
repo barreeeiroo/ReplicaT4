@@ -29,6 +29,7 @@ chrono = "~0.4"
 # Utilities
 uuid = { version = "~1.18", features = ["v4"] }
 async-trait = "~0.1"
+clap = { version = "~4.5", features = ["derive", "env"] }
 
 # AWS SDK for S3 backend
 aws-config = "~1.8"

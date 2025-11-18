@@ -18,6 +18,7 @@ use axum::{
     middleware::{self, Next},
     routing::get,
 };
+use clap::Parser;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
@@ -31,42 +32,59 @@ const DEFAULT_ACCESS_KEY_ID: &str = "AKIAIOSFODNN7EXAMPLE";
 const DEFAULT_SECRET_ACCESS_KEY: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
 const DEFAULT_BUCKET_NAME: &str = "mybucket";
 
+/// ReplicaT4: S3-compatible proxy server with multi-backend replication
+#[derive(Parser, Debug)]
+#[command(name = "replicat4")]
+#[command(about = "Proxy Service to Replicate Data into Multiple S3 Compatible Destinations", long_about = None)]
+struct Cli {
+    /// Path to the configuration file (required)
+    #[arg(short, long, env = "CONFIG_PATH")]
+    config: String,
+
+    /// Port to listen on
+    #[arg(short, long, env = "PORT", default_value_t = PORT)]
+    port: u16,
+
+    /// AWS Access Key ID for incoming requests
+    #[arg(long, env = "AWS_ACCESS_KEY_ID", default_value = DEFAULT_ACCESS_KEY_ID)]
+    access_key_id: String,
+
+    /// AWS Secret Access Key for incoming requests
+    #[arg(long, env = "AWS_SECRET_ACCESS_KEY", default_value = DEFAULT_SECRET_ACCESS_KEY, hide_env_values = true)]
+    secret_access_key: String,
+}
+
 #[tokio::main]
 async fn main() {
     // Initialize tracing
     tracing_subscriber::fmt::init();
 
-    // Load configuration from environment variables or use defaults
-    let access_key_id =
-        std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_else(|_| DEFAULT_ACCESS_KEY_ID.to_string());
-    let secret_access_key = std::env::var("AWS_SECRET_ACCESS_KEY")
-        .unwrap_or_else(|_| DEFAULT_SECRET_ACCESS_KEY.to_string());
-    let bucket_name =
-        std::env::var("BUCKET_NAME").unwrap_or_else(|_| DEFAULT_BUCKET_NAME.to_string());
-
-    tracing::info!("Using bucket: {}", bucket_name);
-    tracing::info!("Using access key: {}", access_key_id);
+    // Parse command line arguments
+    let cli = Cli::parse();
 
     // Load backend configuration from file
-    let config_path = std::env::var("CONFIG_PATH").unwrap_or_else(|_| "config.json".to_string());
-    let config = match Config::from_file(&config_path) {
+    let config = match Config::from_file(&cli.config) {
         Ok(cfg) => {
-            tracing::info!("Loaded configuration from {}", config_path);
+            tracing::info!("Loaded configuration from {}", cli.config);
             cfg
         }
         Err(e) => {
-            tracing::warn!(
-                "Failed to load config file '{}': {}. Using in-memory storage.",
-                config_path,
-                e
+            tracing::error!("Failed to load config file '{}': {}", cli.config, e);
+            tracing::error!(
+                "Configuration file is required. Use --config <path> or set CONFIG_PATH environment variable."
             );
-            Config {
-                backends: vec![BackendConfig::Memory(config::MemoryBackendConfig {
-                    name: "default-memory".to_string(),
-                })],
-            }
+            std::process::exit(1);
         }
     };
+
+    // Determine bucket name: config file > default
+    let bucket_name = config
+        .virtual_bucket
+        .clone()
+        .unwrap_or_else(|| DEFAULT_BUCKET_NAME.to_string());
+
+    tracing::info!("Using bucket: {}", bucket_name);
+    tracing::info!("Using access key: {}", cli.access_key_id);
 
     // Initialize backends from configuration
     let mut backends: Vec<Arc<dyn StorageBackend>> = Vec::new();
@@ -129,10 +147,10 @@ async fn main() {
     // Create credentials store
     let mut credentials_map = HashMap::new();
     credentials_map.insert(
-        access_key_id.clone(),
+        cli.access_key_id.clone(),
         Credentials {
-            _access_key_id: access_key_id.clone(),
-            secret_access_key: secret_access_key.clone(),
+            _access_key_id: cli.access_key_id.clone(),
+            secret_access_key: cli.secret_access_key.clone(),
         },
     );
     let credentials_store = CredentialsStore::new(credentials_map);
@@ -168,7 +186,7 @@ async fn main() {
         .layer(TraceLayer::new_for_http());
 
     // Start server
-    let addr = format!("{}:{}", HOST, PORT);
+    let addr = format!("{}:{}", HOST, cli.port);
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
 
     tracing::info!(
@@ -179,7 +197,7 @@ async fn main() {
     tracing::info!(
         "Example: aws s3 --endpoint-url http://{}:{} ls s3://{}/",
         HOST,
-        PORT,
+        cli.port,
         bucket_name
     );
 

@@ -4,6 +4,8 @@ use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub virtual_bucket: Option<String>,
     pub backends: Vec<BackendConfig>,
 }
 

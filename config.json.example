@@ -1,4 +1,5 @@
 {
+  "virtualBucket": "mybucket",
   "backends": [
     {
       "name": "aws-s3-primary",
