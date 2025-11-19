@@ -110,3 +110,65 @@ impl StorageBackend for InMemoryStorage {
         Ok(results)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+
+    #[tokio::test]
+    async fn test_put_and_get_object() {
+        let storage = InMemoryStorage::new();
+        let key = "test-key";
+        let data = Bytes::from("Hello, World!");
+
+        let etag = storage.put_object(key, data.clone()).await.unwrap();
+        assert!(!etag.is_empty());
+
+        let (mut stream, metadata) = storage.get_object(key).await.unwrap();
+        assert_eq!(metadata.key, key);
+        assert_eq!(metadata.size, data.len() as u64);
+
+        let mut collected = Vec::new();
+        while let Some(result) = stream.next().await {
+            collected.extend_from_slice(&result.unwrap());
+        }
+        assert_eq!(collected, data);
+    }
+
+    #[tokio::test]
+    async fn test_get_nonexistent() {
+        let storage = InMemoryStorage::new();
+        assert!(matches!(
+            storage.get_object("nonexistent").await,
+            Err(S3Error::NoSuchKey)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_delete_object() {
+        let storage = InMemoryStorage::new();
+        let key = "test-key";
+
+        storage.put_object(key, Bytes::from("data")).await.unwrap();
+        storage.delete_object(key).await.unwrap();
+
+        assert!(matches!(
+            storage.head_object(key).await,
+            Err(S3Error::NoSuchKey)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_list_with_prefix() {
+        let storage = InMemoryStorage::new();
+
+        storage.put_object("photos/a.jpg", Bytes::from("1")).await.unwrap();
+        storage.put_object("photos/b.jpg", Bytes::from("2")).await.unwrap();
+        storage.put_object("docs/c.pdf", Bytes::from("3")).await.unwrap();
+
+        let objects = storage.list_objects(Some("photos/"), 100).await.unwrap();
+        assert_eq!(objects.len(), 2);
+        assert!(objects[0].key.starts_with("photos/"));
+    }
+}

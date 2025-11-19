@@ -300,3 +300,49 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> Result<Vec<u8>, S3Error> {
     mac.update(data);
     Ok(mac.finalize().into_bytes().to_vec())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_valid_authorization_header() {
+        let header = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request,SignedHeaders=host;x-amz-date,Signature=abc123";
+        let result = parse_authorization_header(header);
+        assert!(result.is_ok());
+
+        let auth_info = result.unwrap();
+        assert_eq!(auth_info.access_key_id, "AKIAIOSFODNN7EXAMPLE");
+        assert_eq!(auth_info.credential_scope, "20130524/us-east-1/s3/aws4_request");
+        assert_eq!(auth_info.signed_headers, vec!["host", "x-amz-date"]);
+        assert_eq!(auth_info.signature, "abc123");
+    }
+
+    #[test]
+    fn test_parse_missing_prefix() {
+        let header = "Credential=KEY/scope";
+        assert!(matches!(
+            parse_authorization_header(header),
+            Err(S3Error::InvalidRequest(_))
+        ));
+    }
+
+    #[test]
+    fn test_parse_missing_credential() {
+        let header = "AWS4-HMAC-SHA256 SignedHeaders=host,Signature=abc";
+        assert!(matches!(
+            parse_authorization_header(header),
+            Err(S3Error::InvalidRequest(_))
+        ));
+    }
+
+    #[test]
+    fn test_canonicalize_query_string() {
+        assert_eq!(canonicalize_query_string(""), "");
+        assert_eq!(canonicalize_query_string("foo=bar"), "foo=bar");
+
+        // Test sorting
+        let result = canonicalize_query_string("z=1&a=2");
+        assert_eq!(result, "a=2&z=1");
+    }
+}
