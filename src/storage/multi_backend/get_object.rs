@@ -9,58 +9,68 @@ impl MultiBackend {
         key: &str,
     ) -> Result<(ObjectStream, ObjectMetadata), S3Error> {
         match self.read_mode {
-            ReadMode::PrimaryOnly => {
-                // Only read from primary backend
-                tracing::debug!("GET object (primary only mode)");
-                self.primary().get_object(key).await
-            }
-            ReadMode::PrimaryFallback => {
-                // Try primary first, then fallback to others
-                let primary = self.primary();
-                tracing::debug!("GET object (trying primary backend first)");
-                match primary.get_object(key).await {
-                    Ok(result) => return Ok(result),
-                    Err(e) => {
-                        tracing::warn!("Primary backend failed for GET {}: {}", key, e);
-                    }
-                }
+            ReadMode::PrimaryOnly => self.get_object_primary_only(key).await,
+            ReadMode::PrimaryFallback => self.get_object_primary_fallback(key).await,
+            ReadMode::BestEffort => self.get_object_best_effort(key).await,
+        }
+    }
 
-                // Try other backends
-                for (idx, backend) in self.other_backends().enumerate() {
-                    tracing::debug!("GET object (trying fallback backend {})", idx);
-                    match backend.get_object(key).await {
-                        Ok(result) => return Ok(result),
-                        Err(e) => {
-                            tracing::warn!(
-                                "Fallback backend {} failed for GET {}: {}",
-                                idx,
-                                key,
-                                e
-                            );
-                        }
-                    }
-                }
+    async fn get_object_primary_only(
+        &self,
+        key: &str,
+    ) -> Result<(ObjectStream, ObjectMetadata), S3Error> {
+        // Only read from primary backend
+        tracing::debug!("GET object (primary only mode)");
+        self.primary().get_object(key).await
+    }
 
-                Err(S3Error::NoSuchKey)
-            }
-            ReadMode::BestEffort => {
-                // Try all backends, return first success
-                tracing::debug!("GET object (best effort mode - trying all backends)");
-                for (idx, backend) in self.backends.iter().enumerate() {
-                    match backend.get_object(key).await {
-                        Ok(result) => {
-                            tracing::debug!("Backend {} returned object", idx);
-                            return Ok(result);
-                        }
-                        Err(e) => {
-                            tracing::debug!("Backend {} failed for GET {}: {}", idx, key, e);
-                        }
-                    }
-                }
-
-                Err(S3Error::NoSuchKey)
+    async fn get_object_primary_fallback(
+        &self,
+        key: &str,
+    ) -> Result<(ObjectStream, ObjectMetadata), S3Error> {
+        // Try primary first, then fallback to others
+        let primary = self.primary();
+        tracing::debug!("GET object (trying primary backend first)");
+        match primary.get_object(key).await {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                tracing::warn!("Primary backend failed for GET {}: {}", key, e);
             }
         }
+
+        // Try other backends
+        for (idx, backend) in self.other_backends().enumerate() {
+            tracing::debug!("GET object (trying fallback backend {})", idx);
+            match backend.get_object(key).await {
+                Ok(result) => return Ok(result),
+                Err(e) => {
+                    tracing::warn!("Fallback backend {} failed for GET {}: {}", idx, key, e);
+                }
+            }
+        }
+
+        Err(S3Error::NoSuchKey)
+    }
+
+    async fn get_object_best_effort(
+        &self,
+        key: &str,
+    ) -> Result<(ObjectStream, ObjectMetadata), S3Error> {
+        // Try all backends, return first success
+        tracing::debug!("GET object (best effort mode - trying all backends)");
+        for (idx, backend) in self.backends.iter().enumerate() {
+            match backend.get_object(key).await {
+                Ok(result) => {
+                    tracing::debug!("Backend {} returned object", idx);
+                    return Ok(result);
+                }
+                Err(e) => {
+                    tracing::debug!("Backend {} failed for GET {}: {}", idx, key, e);
+                }
+            }
+        }
+
+        Err(S3Error::NoSuchKey)
     }
 }
 

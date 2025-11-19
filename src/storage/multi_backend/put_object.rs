@@ -1,140 +1,148 @@
 use super::MultiBackend;
 use crate::config::WriteMode;
-use crate::storage::backend::ObjectStream;
 use crate::types::error::S3Error;
+use bytes::Bytes;
 use std::sync::Arc;
 
 impl MultiBackend {
     pub(super) async fn put_object_impl(
         &self,
         key: &str,
-        body: ObjectStream,
+        body: super::super::backend::ObjectStream,
     ) -> Result<String, S3Error> {
         // Collect the stream into memory first (needed for replication)
         tracing::debug!("PUT object: collecting stream for replication");
         let data = Self::collect_stream(body).await?;
-
         tracing::debug!("PUT object: collected {} bytes", data.len());
 
         match self.write_mode {
-            WriteMode::AsyncReplication => {
-                // Write to primary backend immediately
-                let primary = self.primary();
-                tracing::info!(
-                    "PUT object (async replication): writing to primary backend immediately"
-                );
+            WriteMode::AsyncReplication => self.put_object_async_replication(key, data).await,
+            WriteMode::MultiSync => self.put_object_multi_sync(key, data).await,
+        }
+    }
 
-                let stream = Self::bytes_to_stream(data.clone());
-                let etag = primary.put_object(key, stream).await?;
+    async fn put_object_async_replication(
+        &self,
+        key: &str,
+        data: Bytes,
+    ) -> Result<String, S3Error> {
+        // Write to primary backend immediately
+        let primary = self.primary();
+        tracing::info!("PUT object (async replication): writing to primary backend immediately");
 
-                tracing::info!("Primary backend successfully wrote object {}", key);
+        let stream = Self::bytes_to_stream(data.clone());
+        let etag = primary.put_object(key, stream).await?;
 
-                // Spawn background tasks to replicate to other backends
-                if self.backends.len() > 1 {
-                    let primary_idx = self.primary_index;
-                    let other_backends: Vec<_> = self
-                        .backends
-                        .iter()
-                        .enumerate()
-                        .filter(move |(idx, _)| *idx != primary_idx)
-                        .map(|(idx, backend)| (idx, Arc::clone(backend)))
-                        .collect();
+        tracing::info!("Primary backend successfully wrote object {}", key);
 
-                    if !other_backends.is_empty() {
-                        tracing::info!(
-                            "Spawning background tasks to replicate to {} other backends",
-                            other_backends.len()
-                        );
+        // Spawn background tasks to replicate to other backends
+        self.spawn_background_replication_tasks(key, data);
 
-                        let key_clone = key.to_string();
-                        tokio::spawn(async move {
-                            for (idx, backend) in other_backends {
-                                let backend_clone = Arc::clone(&backend);
-                                let key = key_clone.clone();
-                                let data = data.clone();
+        Ok(etag)
+    }
 
-                                tokio::spawn(async move {
-                                    let stream = MultiBackend::bytes_to_stream(data);
-                                    match backend_clone.put_object(&key, stream).await {
-                                        Ok(_) => {
-                                            tracing::info!(
-                                                "Background replication: backend {} successfully wrote object {}",
-                                                idx,
-                                                key
-                                            );
-                                        }
-                                        Err(e) => {
-                                            tracing::error!(
-                                                "Background replication: backend {} failed to write object {}: {}",
-                                                idx,
-                                                key,
-                                                e
-                                            );
-                                        }
-                                    }
-                                });
-                            }
-                        });
-                    }
+    async fn put_object_multi_sync(&self, key: &str, data: Bytes) -> Result<String, S3Error> {
+        // Write to all backends concurrently, all must succeed
+        tracing::info!(
+            "PUT object (multi sync): writing to {} backends (all must succeed)",
+            self.backends.len()
+        );
+
+        let tasks: Vec<_> = self
+            .backends
+            .iter()
+            .enumerate()
+            .map(|(idx, backend)| {
+                let backend = Arc::clone(backend);
+                let key = key.to_string();
+                let data = data.clone();
+                async move {
+                    let stream = MultiBackend::bytes_to_stream(data);
+                    let result = backend.put_object(&key, stream).await;
+                    (idx, result)
                 }
+            })
+            .collect();
 
-                Ok(etag)
+        let results = futures::future::join_all(tasks).await;
+
+        // Collect all results - if any failed, we fail
+        let mut etags = Vec::new();
+        for (idx, result) in results {
+            match result {
+                Ok(etag) => {
+                    tracing::info!("Backend {} successfully wrote object {}", idx, key);
+                    etags.push(etag);
+                }
+                Err(e) => {
+                    tracing::error!("Backend {} failed to write object {}: {}", idx, key, e);
+                    // TODO: Implement rollback - delete from successful backends
+                    return Err(S3Error::InternalError(format!(
+                        "Backend {} failed in multi sync mode: {}",
+                        idx, e
+                    )));
+                }
             }
-            WriteMode::MultiSync => {
-                // Write to all backends concurrently, all must succeed
-                tracing::info!(
-                    "PUT object (multi sync): writing to {} backends (all must succeed)",
-                    self.backends.len()
-                );
+        }
 
-                let tasks: Vec<_> = self
-                    .backends
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, backend)| {
-                        let backend = Arc::clone(backend);
-                        let key = key.to_string();
-                        let data = data.clone();
-                        async move {
-                            let stream = MultiBackend::bytes_to_stream(data);
-                            let result = backend.put_object(&key, stream).await;
-                            (idx, result)
-                        }
-                    })
-                    .collect();
+        tracing::info!("PUT object (multi sync): all backends succeeded");
 
-                let results = futures::future::join_all(tasks).await;
+        // Return primary etag
+        Ok(etags[self.primary_index].clone())
+    }
 
-                // Collect all results - if any failed, we fail
-                let mut etags = Vec::new();
-                for (idx, result) in results {
-                    match result {
-                        Ok(etag) => {
-                            tracing::info!("Backend {} successfully wrote object {}", idx, key);
-                            etags.push(etag);
+    fn spawn_background_replication_tasks(&self, key: &str, data: Bytes) {
+        if self.backends.len() <= 1 {
+            return;
+        }
+
+        let primary_idx = self.primary_index;
+        let other_backends: Vec<_> = self
+            .backends
+            .iter()
+            .enumerate()
+            .filter(move |(idx, _)| *idx != primary_idx)
+            .map(|(idx, backend)| (idx, Arc::clone(backend)))
+            .collect();
+
+        if other_backends.is_empty() {
+            return;
+        }
+
+        tracing::info!(
+            "Spawning background tasks to replicate to {} other backends",
+            other_backends.len()
+        );
+
+        let key_clone = key.to_string();
+        tokio::spawn(async move {
+            for (idx, backend) in other_backends {
+                let backend_clone = Arc::clone(&backend);
+                let key = key_clone.clone();
+                let data = data.clone();
+
+                tokio::spawn(async move {
+                    let stream = MultiBackend::bytes_to_stream(data);
+                    match backend_clone.put_object(&key, stream).await {
+                        Ok(_) => {
+                            tracing::info!(
+                                "Background replication: backend {} successfully wrote object {}",
+                                idx,
+                                key
+                            );
                         }
                         Err(e) => {
                             tracing::error!(
-                                "Backend {} failed to write object {}: {}",
+                                "Background replication: backend {} failed to write object {}: {}",
                                 idx,
                                 key,
                                 e
                             );
-                            // TODO: Implement rollback - delete from successful backends
-                            return Err(S3Error::InternalError(format!(
-                                "Backend {} failed in multi sync mode: {}",
-                                idx, e
-                            )));
                         }
                     }
-                }
-
-                tracing::info!("PUT object (multi sync): all backends succeeded");
-
-                // Return primary etag
-                Ok(etags[self.primary_index].clone())
+                });
             }
-        }
+        });
     }
 }
 

@@ -6,113 +6,116 @@ use std::sync::Arc;
 impl MultiBackend {
     pub(super) async fn delete_object_impl(&self, key: &str) -> Result<(), S3Error> {
         match self.write_mode {
-            WriteMode::AsyncReplication => {
-                // Delete from primary backend immediately
-                let primary = self.primary();
-                tracing::info!(
-                    "DELETE object (async replication): deleting from primary backend immediately"
-                );
+            WriteMode::AsyncReplication => self.delete_object_async_replication(key).await,
+            WriteMode::MultiSync => self.delete_object_multi_sync(key).await,
+        }
+    }
 
-                primary.delete_object(key).await?;
-                tracing::info!("Primary backend successfully deleted object {}", key);
+    async fn delete_object_async_replication(&self, key: &str) -> Result<(), S3Error> {
+        // Delete from primary backend immediately
+        let primary = self.primary();
+        tracing::info!(
+            "DELETE object (async replication): deleting from primary backend immediately"
+        );
 
-                // Spawn background tasks to delete from other backends
-                if self.backends.len() > 1 {
-                    let primary_idx = self.primary_index;
-                    let other_backends: Vec<_> = self
-                        .backends
-                        .iter()
-                        .enumerate()
-                        .filter(move |(idx, _)| *idx != primary_idx)
-                        .map(|(idx, backend)| (idx, Arc::clone(backend)))
-                        .collect();
+        primary.delete_object(key).await?;
+        tracing::info!("Primary backend successfully deleted object {}", key);
 
-                    if !other_backends.is_empty() {
-                        tracing::info!(
-                            "Spawning background tasks to delete from {} other backends",
-                            other_backends.len()
-                        );
+        // Spawn background tasks to delete from other backends
+        self.spawn_background_delete_tasks(key);
 
-                        let key_clone = key.to_string();
-                        tokio::spawn(async move {
-                            for (idx, backend) in other_backends {
-                                let backend_clone = Arc::clone(&backend);
-                                let key = key_clone.clone();
+        Ok(())
+    }
 
-                                tokio::spawn(async move {
-                                    match backend_clone.delete_object(&key).await {
-                                        Ok(_) => {
-                                            tracing::info!(
-                                                "Background deletion: backend {} successfully deleted object {}",
-                                                idx,
-                                                key
-                                            );
-                                        }
-                                        Err(e) => {
-                                            tracing::error!(
-                                                "Background deletion: backend {} failed to delete object {}: {}",
-                                                idx,
-                                                key,
-                                                e
-                                            );
-                                        }
-                                    }
-                                });
-                            }
-                        });
-                    }
+    async fn delete_object_multi_sync(&self, key: &str) -> Result<(), S3Error> {
+        // Delete from all backends concurrently, all must succeed
+        tracing::info!(
+            "DELETE object (multi sync): deleting from {} backends (all must succeed)",
+            self.backends.len()
+        );
+
+        let tasks: Vec<_> = self
+            .backends
+            .iter()
+            .enumerate()
+            .map(|(idx, backend)| {
+                let backend = Arc::clone(backend);
+                let key = key.to_string();
+                async move {
+                    let result = backend.delete_object(&key).await;
+                    (idx, result)
                 }
+            })
+            .collect();
 
-                Ok(())
-            }
-            WriteMode::MultiSync => {
-                // Delete from all backends concurrently, all must succeed
-                tracing::info!(
-                    "DELETE object (multi sync): deleting from {} backends (all must succeed)",
-                    self.backends.len()
-                );
+        let results = futures::future::join_all(tasks).await;
 
-                let tasks: Vec<_> = self
-                    .backends
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, backend)| {
-                        let backend = Arc::clone(backend);
-                        let key = key.to_string();
-                        async move {
-                            let result = backend.delete_object(&key).await;
-                            (idx, result)
-                        }
-                    })
-                    .collect();
+        // All must succeed
+        for (idx, result) in results {
+            result.map_err(|e| {
+                tracing::error!("Backend {} failed to delete object {}: {}", idx, key, e);
+                S3Error::InternalError(format!(
+                    "Backend {} failed to delete in multi sync mode: {}",
+                    idx, e
+                ))
+            })?;
+            tracing::info!("Backend {} successfully deleted object {}", idx, key);
+        }
 
-                let results = futures::future::join_all(tasks).await;
+        tracing::info!("DELETE object (multi sync): all backends succeeded");
+        Ok(())
+    }
 
-                // All must succeed
-                for (idx, result) in results {
-                    match result {
+    fn spawn_background_delete_tasks(&self, key: &str) {
+        if self.backends.len() <= 1 {
+            return;
+        }
+
+        let primary_idx = self.primary_index;
+        let other_backends: Vec<_> = self
+            .backends
+            .iter()
+            .enumerate()
+            .filter(move |(idx, _)| *idx != primary_idx)
+            .map(|(idx, backend)| (idx, Arc::clone(backend)))
+            .collect();
+
+        if other_backends.is_empty() {
+            return;
+        }
+
+        tracing::info!(
+            "Spawning background tasks to delete from {} other backends",
+            other_backends.len()
+        );
+
+        let key_clone = key.to_string();
+        tokio::spawn(async move {
+            for (idx, backend) in other_backends {
+                let backend_clone = Arc::clone(&backend);
+                let key = key_clone.clone();
+
+                tokio::spawn(async move {
+                    match backend_clone.delete_object(&key).await {
                         Ok(_) => {
-                            tracing::info!("Backend {} successfully deleted object {}", idx, key);
+                            tracing::info!(
+                                "Background deletion: backend {} successfully deleted object {}",
+                                idx,
+                                key
+                            );
                         }
                         Err(e) => {
                             tracing::error!(
-                                "Backend {} failed to delete object {}: {}",
+                                "Background deletion: backend {} failed to delete object {}: {}",
                                 idx,
                                 key,
                                 e
                             );
-                            return Err(S3Error::InternalError(format!(
-                                "Backend {} failed to delete in multi sync mode: {}",
-                                idx, e
-                            )));
                         }
                     }
-                }
-
-                tracing::info!("DELETE object (multi sync): all backends succeeded");
-                Ok(())
+                });
             }
-        }
+        });
     }
 }
 
