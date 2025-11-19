@@ -11,7 +11,7 @@ use config::{BackendConfig, Config};
 use handlers::{
     delete_object, get_object, head_bucket, head_object, list_objects, not_found, put_object,
 };
-use storage::{InMemoryStorage, S3Backend, StorageBackend};
+use storage::{InMemoryStorage, MultiBackend, S3Backend, StorageBackend};
 use types::Credentials;
 
 use axum::{
@@ -94,11 +94,13 @@ async fn main() {
 
     // Initialize backends from configuration
     let mut backends: Vec<Arc<dyn StorageBackend>> = Vec::new();
+    let mut backend_names: Vec<String> = Vec::new();
 
     for backend_config in config.backends {
         match backend_config {
             BackendConfig::S3(s3_config) => {
                 tracing::info!("Initializing S3 backend: {}", s3_config.name);
+                let backend_name = s3_config.name.clone();
                 match S3Backend::new(
                     s3_config.name.clone(),
                     s3_config.bucket,
@@ -112,15 +114,16 @@ async fn main() {
                 {
                     Ok(backend) => {
                         tracing::info!(
-                            "✓ S3 backend '{}' initialized successfully",
-                            s3_config.name
+                            "S3 backend '{}' initialized successfully",
+                            backend_name
                         );
                         backends.push(Arc::new(backend));
+                        backend_names.push(backend_name);
                     }
                     Err(e) => {
                         tracing::error!(
-                            "✗ Failed to initialize S3 backend '{}': {}",
-                            s3_config.name,
+                            "Failed to initialize S3 backend '{}': {}",
+                            backend_name,
                             e
                         );
                     }
@@ -129,6 +132,7 @@ async fn main() {
             BackendConfig::Memory(mem_config) => {
                 tracing::info!("Initializing in-memory backend: {}", mem_config.name);
                 backends.push(Arc::new(InMemoryStorage::new()));
+                backend_names.push(mem_config.name.clone());
                 tracing::info!("✓ In-memory backend '{}' initialized", mem_config.name);
             }
         }
@@ -144,10 +148,38 @@ async fn main() {
         tracing::info!("Using single backend (no replication)");
         backends.into_iter().next().unwrap()
     } else {
-        tracing::info!("Using single backend (no replication)");
-        // tracing::info!("Using multi-backend replication with {} backends", backends.len());
-        // Arc::new(MultiBackend::new(backends))
-        backends.into_iter().next().unwrap()
+        // Determine primary backend index
+        let primary_index = if let Some(primary_name) = &config.primary_backend_name {
+            // Find the index of the specified primary backend
+            backend_names
+                .iter()
+                .position(|name| name == primary_name)
+                .unwrap_or_else(|| {
+                    tracing::warn!(
+                        "Primary backend '{}' not found, defaulting to first backend '{}'",
+                        primary_name,
+                        backend_names[0]
+                    );
+                    0
+                })
+        } else {
+            // Default to first backend if no primary specified
+            tracing::info!("No primary backend specified, using first backend '{}' as primary", backend_names[0]);
+            0
+        };
+
+        tracing::info!(
+            "Using multi-backend replication with {} backends (primary: '{}')",
+            backends.len(),
+            backend_names[primary_index]
+        );
+
+        Arc::new(MultiBackend::new(
+            backends,
+            primary_index,
+            config.read_mode,
+            config.write_mode,
+        ))
     };
 
     // Create credentials store

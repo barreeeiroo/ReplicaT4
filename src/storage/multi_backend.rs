@@ -8,7 +8,7 @@ use std::sync::Arc;
 /// Multi-backend storage that replicates operations across multiple backends
 pub struct MultiBackend {
     backends: Vec<Arc<dyn StorageBackend>>,
-    primary_index: Option<usize>,
+    primary_index: usize,
     read_mode: ReadMode,
     write_mode: WriteMode,
 }
@@ -18,17 +18,17 @@ impl MultiBackend {
     ///
     /// # Arguments
     /// * `backends` - List of storage backends to use (must be non-empty)
-    /// * `primary_index` - Optional index of the primary backend
+    /// * `primary_index` - Index of the primary backend (0-based)
     /// * `read_mode` - Read consistency mode
     /// * `write_mode` - Write consistency mode
     pub fn new(
         backends: Vec<Arc<dyn StorageBackend>>,
-        primary_index: Option<usize>,
+        primary_index: usize,
         read_mode: ReadMode,
         write_mode: WriteMode,
     ) -> Self {
         tracing::info!(
-            "Initializing MultiBackend with {} backends (primary_index: {:?}, read_mode: {:?}, write_mode: {:?})",
+            "Initializing MultiBackend with {} backends (primary_index: {}, read_mode: {:?}, write_mode: {:?})",
             backends.len(),
             primary_index,
             read_mode,
@@ -43,15 +43,9 @@ impl MultiBackend {
         }
     }
 
-    /// Get the primary backend if specified, otherwise return None
-    fn primary(&self) -> Option<&Arc<dyn StorageBackend>> {
-        self.primary_index.map(|idx| &self.backends[idx])
-    }
-
-    /// Get the primary backend if specified, otherwise return the first backend
-    fn primary_or_first(&self) -> &Arc<dyn StorageBackend> {
-        self.primary()
-            .unwrap_or_else(|| &self.backends[0])
+    /// Get the primary backend
+    fn primary(&self) -> &Arc<dyn StorageBackend> {
+        &self.backends[self.primary_index]
     }
 
     /// Get all backends except the primary (for fallback reads)
@@ -60,7 +54,7 @@ impl MultiBackend {
         self.backends
             .iter()
             .enumerate()
-            .filter(move |(idx, _)| Some(*idx) != primary_idx)
+            .filter(move |(idx, _)| *idx != primary_idx)
             .map(|(_, backend)| backend)
     }
 
@@ -84,7 +78,7 @@ impl MultiBackend {
 impl StorageBackend for MultiBackend {
     async fn head_bucket(&self) -> Result<(), S3Error> {
         // Query primary or first backend
-        let backend = self.primary_or_first();
+        let backend = self.primary();
         tracing::debug!("HEAD bucket (using primary/first backend)");
         backend.head_bucket().await
     }
@@ -95,7 +89,7 @@ impl StorageBackend for MultiBackend {
         max_keys: i32,
     ) -> Result<Vec<ObjectMetadata>, S3Error> {
         // Query primary or first backend
-        let backend = self.primary_or_first();
+        let backend = self.primary();
         tracing::debug!("LIST objects (using primary/first backend)");
         backend.list_objects(prefix, max_keys).await
     }
@@ -103,19 +97,18 @@ impl StorageBackend for MultiBackend {
     async fn head_object(&self, key: &str) -> Result<ObjectMetadata, S3Error> {
         match self.read_mode {
             ReadMode::PrimaryOnly => {
-                // Only read from primary or first backend
+                // Only read from primary backend
                 tracing::debug!("HEAD object (primary only mode)");
-                self.primary_or_first().head_object(key).await
+                self.primary().head_object(key).await
             }
             ReadMode::PrimaryFallback => {
                 // Try primary first, then fallback to others
-                if let Some(primary) = self.primary() {
-                    tracing::debug!("HEAD object (trying primary backend first)");
-                    match primary.head_object(key).await {
-                        Ok(metadata) => return Ok(metadata),
-                        Err(e) => {
-                            tracing::warn!("Primary backend failed for HEAD {}: {}", key, e);
-                        }
+                let primary = self.primary();
+                tracing::debug!("HEAD object (trying primary backend first)");
+                match primary.head_object(key).await {
+                    Ok(metadata) => return Ok(metadata),
+                    Err(e) => {
+                        tracing::warn!("Primary backend failed for HEAD {}: {}", key, e);
                     }
                 }
 
@@ -155,19 +148,18 @@ impl StorageBackend for MultiBackend {
     async fn get_object(&self, key: &str) -> Result<(ObjectStream, ObjectMetadata), S3Error> {
         match self.read_mode {
             ReadMode::PrimaryOnly => {
-                // Only read from primary or first backend
+                // Only read from primary backend
                 tracing::debug!("GET object (primary only mode)");
-                self.primary_or_first().get_object(key).await
+                self.primary().get_object(key).await
             }
             ReadMode::PrimaryFallback => {
                 // Try primary first, then fallback to others
-                if let Some(primary) = self.primary() {
-                    tracing::debug!("GET object (trying primary backend first)");
-                    match primary.get_object(key).await {
-                        Ok(result) => return Ok(result),
-                        Err(e) => {
-                            tracing::warn!("Primary backend failed for GET {}: {}", key, e);
-                        }
+                let primary = self.primary();
+                tracing::debug!("GET object (trying primary backend first)");
+                match primary.get_object(key).await {
+                    Ok(result) => return Ok(result),
+                    Err(e) => {
+                        tracing::warn!("Primary backend failed for GET {}: {}", key, e);
                     }
                 }
 
@@ -214,7 +206,7 @@ impl StorageBackend for MultiBackend {
         match self.write_mode {
             WriteMode::AsyncReplication => {
                 // Write to primary/first backend immediately
-                let primary = self.primary_or_first();
+                let primary = self.primary();
                 tracing::info!(
                     "PUT object (async replication): writing to primary/first backend immediately"
                 );
@@ -226,18 +218,12 @@ impl StorageBackend for MultiBackend {
 
                 // Spawn background tasks to replicate to other backends
                 if self.backends.len() > 1 {
+                    let primary_idx = self.primary_index;
                     let other_backends: Vec<_> = self
                         .backends
                         .iter()
                         .enumerate()
-                        .filter(|(idx, _)| {
-                            // Skip primary backend
-                            if let Some(primary_idx) = self.primary_index {
-                                *idx != primary_idx
-                            } else {
-                                *idx != 0 // Skip first backend if no primary
-                            }
-                        })
+                        .filter(move |(idx, _)| *idx != primary_idx)
                         .map(|(idx, backend)| (idx, Arc::clone(backend)))
                         .collect();
 
@@ -327,12 +313,8 @@ impl StorageBackend for MultiBackend {
 
                 tracing::info!("PUT object (multi sync): all backends succeeded");
 
-                // Return primary etag if available, otherwise first etag
-                if let Some(primary_idx) = self.primary_index {
-                    Ok(etags[primary_idx].clone())
-                } else {
-                    Ok(etags[0].clone())
-                }
+                // Return primary etag
+                Ok(etags[self.primary_index].clone())
             }
         }
     }
@@ -341,7 +323,7 @@ impl StorageBackend for MultiBackend {
         match self.write_mode {
             WriteMode::AsyncReplication => {
                 // Delete from primary/first backend immediately
-                let primary = self.primary_or_first();
+                let primary = self.primary();
                 tracing::info!(
                     "DELETE object (async replication): deleting from primary/first backend immediately"
                 );
@@ -351,18 +333,12 @@ impl StorageBackend for MultiBackend {
 
                 // Spawn background tasks to delete from other backends
                 if self.backends.len() > 1 {
+                    let primary_idx = self.primary_index;
                     let other_backends: Vec<_> = self
                         .backends
                         .iter()
                         .enumerate()
-                        .filter(|(idx, _)| {
-                            // Skip primary backend
-                            if let Some(primary_idx) = self.primary_index {
-                                *idx != primary_idx
-                            } else {
-                                *idx != 0 // Skip first backend if no primary
-                            }
-                        })
+                        .filter(move |(idx, _)| *idx != primary_idx)
                         .map(|(idx, backend)| (idx, Arc::clone(backend)))
                         .collect();
 
@@ -462,21 +438,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_multibackend_put_and_get_best_effort() {
+    async fn test_multibackend_put_and_get_multi_sync() {
         let backend1 = Arc::new(InMemoryStorage::new()) as Arc<dyn StorageBackend>;
         let backend2 = Arc::new(InMemoryStorage::new()) as Arc<dyn StorageBackend>;
 
         let multi = MultiBackend::new(
             vec![backend1.clone(), backend2.clone()],
-            Some(0), // backend1 is primary (index 0)
+            0, // backend1 is primary (index 0)
             ReadMode::PrimaryFallback,
-            WriteMode::AsyncReplication,
+            WriteMode::MultiSync,
         );
 
         let key = "test-key";
         let data = Bytes::from("Hello, World!");
 
-        // Put object
+        // Put object (synchronous to all backends)
         let etag = multi
             .put_object(key, bytes_to_stream(data.clone()))
             .await
@@ -494,7 +470,7 @@ mod tests {
         }
         assert_eq!(collected, data);
 
-        // Verify both backends have the object
+        // Verify both backends have the object (guaranteed with MultiSync)
         assert!(backend1.head_object(key).await.is_ok());
         assert!(backend2.head_object(key).await.is_ok());
     }
@@ -506,7 +482,7 @@ mod tests {
 
         let multi = MultiBackend::new(
             vec![backend1.clone(), backend2.clone()],
-            None, // no primary
+            0, // first backend as primary
             ReadMode::PrimaryOnly,
             WriteMode::MultiSync,
         );
@@ -533,7 +509,7 @@ mod tests {
 
         let multi = MultiBackend::new(
             vec![backend1.clone(), backend2.clone()],
-            None,
+            0, // first backend as primary
             ReadMode::PrimaryFallback,
             WriteMode::AsyncReplication,
         );
@@ -560,7 +536,7 @@ mod tests {
 
         let multi = MultiBackend::new(
             vec![backend1.clone(), backend2.clone()],
-            Some(0), // backend1 is primary
+            0, // backend1 is primary
             ReadMode::PrimaryFallback,
             WriteMode::AsyncReplication,
         );
@@ -591,12 +567,12 @@ mod tests {
 
         let multi = MultiBackend::new(
             vec![backend1.clone(), backend2.clone()],
-            Some(1), // backend2 is primary (index 1)
+            1, // backend2 is primary (index 1)
             ReadMode::PrimaryOnly,
             WriteMode::MultiSync,
         );
 
-        assert_eq!(multi.primary_index, Some(1));
+        assert_eq!(multi.primary_index, 1);
     }
 
     #[tokio::test]
@@ -606,7 +582,7 @@ mod tests {
 
         let multi = MultiBackend::new(
             vec![backend1.clone(), backend2.clone()],
-            Some(0), // backend1 is primary
+            0, // backend1 is primary
             ReadMode::PrimaryFallback,
             WriteMode::AsyncReplication,
         );
