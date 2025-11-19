@@ -313,7 +313,10 @@ mod tests {
 
         let auth_info = result.unwrap();
         assert_eq!(auth_info.access_key_id, "AKIAIOSFODNN7EXAMPLE");
-        assert_eq!(auth_info.credential_scope, "20130524/us-east-1/s3/aws4_request");
+        assert_eq!(
+            auth_info.credential_scope,
+            "20130524/us-east-1/s3/aws4_request"
+        );
         assert_eq!(auth_info.signed_headers, vec!["host", "x-amz-date"]);
         assert_eq!(auth_info.signature, "abc123");
     }

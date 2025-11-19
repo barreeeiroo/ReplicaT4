@@ -163,9 +163,18 @@ mod tests {
     async fn test_list_with_prefix() {
         let storage = InMemoryStorage::new();
 
-        storage.put_object("photos/a.jpg", Bytes::from("1")).await.unwrap();
-        storage.put_object("photos/b.jpg", Bytes::from("2")).await.unwrap();
-        storage.put_object("docs/c.pdf", Bytes::from("3")).await.unwrap();
+        storage
+            .put_object("photos/a.jpg", Bytes::from("1"))
+            .await
+            .unwrap();
+        storage
+            .put_object("photos/b.jpg", Bytes::from("2"))
+            .await
+            .unwrap();
+        storage
+            .put_object("docs/c.pdf", Bytes::from("3"))
+            .await
+            .unwrap();
 
         let objects = storage.list_objects(Some("photos/"), 100).await.unwrap();
         assert_eq!(objects.len(), 2);
