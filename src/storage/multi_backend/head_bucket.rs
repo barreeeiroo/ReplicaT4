@@ -11,6 +11,7 @@ impl MultiBackend {
             ReadMode::PrimaryOnly => self.head_bucket_primary_only().await,
             ReadMode::PrimaryFallback => self.head_bucket_primary_fallback().await,
             ReadMode::BestEffort => self.head_bucket_best_effort().await,
+            ReadMode::AllConsistent => self.head_bucket_all_consistent().await,
         }
     }
 
@@ -98,5 +99,43 @@ impl MultiBackend {
 
         // All backends failed with real errors
         Err(last_error.unwrap_or(S3Error::NoSuchBucket))
+    }
+
+    async fn head_bucket_all_consistent(&self) -> Result<(), S3Error> {
+        // Verify all backends confirm the bucket exists
+        tracing::debug!(
+            "HEAD bucket (all consistent mode - verifying {} backends)",
+            self.backends.len()
+        );
+
+        let tasks: Vec<_> = self
+            .backends
+            .iter()
+            .enumerate()
+            .map(|(idx, backend)| {
+                let backend = Arc::clone(backend);
+                async move {
+                    let result = backend.head_bucket().await;
+                    (idx, result)
+                }
+                .boxed()
+            })
+            .collect();
+
+        let results = futures::future::join_all(tasks).await;
+
+        // All backends must succeed
+        for (idx, result) in results {
+            if let Err(e) = result {
+                tracing::error!("Backend {} failed HEAD bucket: {}", idx, e);
+                return Err(S3Error::InternalError(format!(
+                    "Consistency check failed: backend {} failed",
+                    idx
+                )));
+            }
+        }
+
+        tracing::debug!("All backends confirmed bucket exists");
+        Ok(())
     }
 }

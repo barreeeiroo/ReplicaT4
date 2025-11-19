@@ -12,6 +12,8 @@ pub enum ReadMode {
     PrimaryFallback,
     /// Try any backend to find the object
     BestEffort,
+    /// Read from all backends, verify consistency (ETags match), return primary result
+    AllConsistent,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

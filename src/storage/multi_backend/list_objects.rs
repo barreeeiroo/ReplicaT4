@@ -15,6 +15,7 @@ impl MultiBackend {
             ReadMode::PrimaryOnly => self.list_objects_primary_only(prefix, max_keys).await,
             ReadMode::PrimaryFallback => self.list_objects_primary_fallback(prefix, max_keys).await,
             ReadMode::BestEffort => self.list_objects_best_effort(prefix, max_keys).await,
+            ReadMode::AllConsistent => self.list_objects_all_consistent(prefix, max_keys).await,
         }
     }
 
@@ -104,6 +105,128 @@ impl MultiBackend {
 
         // All backends failed with real errors
         Err(last_error.unwrap_or(S3Error::InternalError("All backends failed".to_string())))
+    }
+
+    async fn list_objects_all_consistent(
+        &self,
+        prefix: Option<&str>,
+        max_keys: i32,
+    ) -> Result<Vec<ObjectMetadata>, S3Error> {
+        // Fetch from all backends and verify lists match
+        tracing::debug!(
+            "LIST objects (all consistent mode - verifying {} backends)",
+            self.backends.len()
+        );
+
+        let tasks: Vec<_> = self
+            .backends
+            .iter()
+            .enumerate()
+            .map(|(idx, backend)| {
+                let backend = Arc::clone(backend);
+                let prefix = prefix.map(|s| s.to_string());
+                async move {
+                    let result = backend.list_objects(prefix.as_deref(), max_keys).await;
+                    (idx, result)
+                }
+                .boxed()
+            })
+            .collect();
+
+        let results = futures::future::join_all(tasks).await;
+
+        // Collect all successful results
+        let mut all_lists = Vec::new();
+
+        for (idx, result) in results {
+            match result {
+                Ok(objects) => {
+                    all_lists.push((idx, objects));
+                }
+                Err(e) => {
+                    tracing::warn!("Backend {} failed for LIST objects: {}", idx, e);
+                    return Err(S3Error::InternalError(format!(
+                        "Consistency check failed: backend {} failed",
+                        idx
+                    )));
+                }
+            }
+        }
+
+        // All backends must succeed
+        if all_lists.len() != self.backends.len() {
+            return Err(S3Error::InternalError(format!(
+                "Consistency check failed: only {}/{} backends succeeded",
+                all_lists.len(),
+                self.backends.len()
+            )));
+        }
+
+        // Verify all lists have the same objects (same keys and ETags)
+        use std::collections::HashMap;
+
+        let primary_list = &all_lists[self.primary_index].1;
+        let primary_map: HashMap<_, _> = primary_list
+            .iter()
+            .map(|obj| (&obj.key, &obj.etag))
+            .collect();
+
+        for (idx, objects) in &all_lists {
+            if *idx == self.primary_index {
+                continue;
+            }
+
+            // Check same number of objects
+            if objects.len() != primary_list.len() {
+                tracing::error!(
+                    "List length mismatch: backend {} has {} objects, primary has {}",
+                    idx,
+                    objects.len(),
+                    primary_list.len()
+                );
+                return Err(S3Error::InternalError(
+                    "Consistency check failed: different number of objects".to_string(),
+                ));
+            }
+
+            // Check each object has same ETag
+            for obj in objects {
+                match primary_map.get(&obj.key) {
+                    Some(primary_etag) => {
+                        if &obj.etag != *primary_etag {
+                            tracing::error!(
+                                "ETag mismatch for key {}: backend {} has {}, primary has {}",
+                                obj.key,
+                                idx,
+                                obj.etag,
+                                primary_etag
+                            );
+                            return Err(S3Error::InternalError(
+                                "Consistency check failed: ETag mismatch".to_string(),
+                            ));
+                        }
+                    }
+                    None => {
+                        tracing::error!(
+                            "Key {} exists in backend {} but not in primary",
+                            obj.key,
+                            idx
+                        );
+                        return Err(S3Error::InternalError(
+                            "Consistency check failed: different objects".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        tracing::debug!(
+            "All backends returned consistent lists ({} objects)",
+            primary_list.len()
+        );
+
+        // Return primary result
+        Ok(all_lists.remove(self.primary_index).1)
     }
 }
 

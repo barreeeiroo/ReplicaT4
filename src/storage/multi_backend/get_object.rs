@@ -15,6 +15,7 @@ impl MultiBackend {
             ReadMode::PrimaryOnly => self.get_object_primary_only(key).await,
             ReadMode::PrimaryFallback => self.get_object_primary_fallback(key).await,
             ReadMode::BestEffort => self.get_object_best_effort(key).await,
+            ReadMode::AllConsistent => self.get_object_all_consistent(key).await,
         }
     }
 
@@ -121,6 +122,81 @@ impl MultiBackend {
 
         // All backends failed with real errors
         Err(last_error.unwrap_or(S3Error::NoSuchKey))
+    }
+
+    async fn get_object_all_consistent(
+        &self,
+        key: &str,
+    ) -> Result<(ObjectStream, ObjectMetadata), S3Error> {
+        // Fetch from all backends and verify ETags match
+        tracing::debug!(
+            "GET object (all consistent mode - verifying {} backends)",
+            self.backends.len()
+        );
+
+        let tasks: Vec<_> = self
+            .backends
+            .iter()
+            .enumerate()
+            .map(|(idx, backend)| {
+                let backend = Arc::clone(backend);
+                let key = key.to_string();
+                async move {
+                    let result = backend.get_object(&key).await;
+                    (idx, result)
+                }
+                .boxed()
+            })
+            .collect();
+
+        let results = futures::future::join_all(tasks).await;
+
+        // Collect all successful results
+        let mut successful_results = Vec::new();
+        let mut errors = Vec::new();
+
+        for (idx, result) in results {
+            match result {
+                Ok((stream, metadata)) => {
+                    successful_results.push((idx, stream, metadata));
+                }
+                Err(e) => {
+                    tracing::warn!("Backend {} failed for GET {}: {}", idx, key, e);
+                    errors.push((idx, e));
+                }
+            }
+        }
+
+        // All backends must succeed
+        if successful_results.len() != self.backends.len() {
+            return Err(S3Error::InternalError(format!(
+                "Consistency check failed: only {}/{} backends succeeded",
+                successful_results.len(),
+                self.backends.len()
+            )));
+        }
+
+        // Verify all ETags match
+        let primary_etag = &successful_results[self.primary_index].2.etag;
+        for (idx, _, metadata) in &successful_results {
+            if &metadata.etag != primary_etag {
+                tracing::error!(
+                    "ETag mismatch: backend {} has {}, primary has {}",
+                    idx,
+                    metadata.etag,
+                    primary_etag
+                );
+                return Err(S3Error::InternalError(format!(
+                    "Consistency check failed: ETag mismatch between backends"
+                )));
+            }
+        }
+
+        tracing::debug!("All backends returned consistent ETags: {}", primary_etag);
+
+        // Return primary result
+        let (_, stream, metadata) = successful_results.remove(self.primary_index);
+        Ok((stream, metadata))
     }
 }
 
