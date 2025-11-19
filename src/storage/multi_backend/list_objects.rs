@@ -1,8 +1,7 @@
 use super::MultiBackend;
 use crate::config::ReadMode;
 use crate::types::{ObjectMetadata, error::S3Error};
-use futures::future::FutureExt;
-use futures::stream::{FuturesUnordered, StreamExt};
+use futures::FutureExt;
 use std::sync::Arc;
 
 impl MultiBackend {
@@ -63,48 +62,17 @@ impl MultiBackend {
         prefix: Option<&str>,
         max_keys: i32,
     ) -> Result<Vec<ObjectMetadata>, S3Error> {
-        // Try all backends concurrently, return first success
-        tracing::debug!(
-            "LIST objects (best effort mode - racing {} backends)",
-            self.backends.len()
-        );
-
-        let tasks: Vec<_> = self
-            .backends
-            .iter()
-            .enumerate()
-            .map(|(idx, backend)| {
-                let backend = Arc::clone(backend);
-                let prefix = prefix.map(|s| s.to_string());
-                async move {
-                    let result = backend.list_objects(prefix.as_deref(), max_keys).await;
-                    (idx, result)
-                }
-                .boxed()
-            })
-            .collect();
-
-        let mut futures = tasks.into_iter().collect::<FuturesUnordered<_>>();
-
-        let mut last_error = None;
-        while let Some((idx, result)) = futures.next().await {
-            match result {
-                Ok(objects) => {
-                    tracing::debug!("Backend {} won the race and returned list", idx);
-                    // Explicitly drop remaining futures to cancel them
-                    drop(futures);
-                    return Ok(objects);
-                }
-                Err(e) => {
-                    tracing::debug!("Backend {} failed in race for LIST objects: {}", idx, e);
-                    // Real error - continue trying other backends
-                    last_error = Some(e);
-                }
-            }
-        }
-
-        // All backends failed with real errors
-        Err(last_error.unwrap_or(S3Error::InternalError("All backends failed".to_string())))
+        let prefix = prefix.map(|s| s.to_string());
+        self.race_all_backends(
+            "LIST objects",
+            |_| false, // No "not found" error for list - empty list is success
+            S3Error::InternalError("All backends failed".to_string()),
+            |backend| {
+                let prefix = prefix.clone();
+                async move { backend.list_objects(prefix.as_deref(), max_keys).await }
+            },
+        )
+        .await
     }
 
     async fn list_objects_all_consistent(

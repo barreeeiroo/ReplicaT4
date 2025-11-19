@@ -1,9 +1,6 @@
 use super::MultiBackend;
 use crate::config::ReadMode;
 use crate::types::error::S3Error;
-use futures::future::FutureExt;
-use futures::stream::{FuturesUnordered, StreamExt};
-use std::sync::Arc;
 
 impl MultiBackend {
     pub(super) async fn head_bucket_impl(&self) -> Result<(), S3Error> {
@@ -22,120 +19,29 @@ impl MultiBackend {
     }
 
     async fn head_bucket_primary_fallback(&self) -> Result<(), S3Error> {
-        // Try primary first, then fallback to others
-        let primary = self.primary();
-        tracing::debug!("HEAD bucket (trying primary backend first)");
-        match primary.head_bucket().await {
-            Ok(()) => return Ok(()),
-            Err(S3Error::NoSuchBucket) => {
-                // Don't fallback if bucket doesn't exist in primary
-                tracing::debug!("Bucket not found in primary backend, not falling back");
-                return Err(S3Error::NoSuchBucket);
-            }
-            Err(e) => {
-                tracing::warn!("Primary backend failed for HEAD bucket: {}", e);
-            }
-        }
-
-        // Try other backends (only if there was a real error, not NoSuchBucket)
-        for (idx, backend) in self.other_backends().enumerate() {
-            tracing::debug!("HEAD bucket (trying fallback backend {})", idx);
-            match backend.head_bucket().await {
-                Ok(()) => return Ok(()),
-                Err(e) => {
-                    tracing::warn!("Fallback backend {} failed for HEAD bucket: {}", idx, e);
-                }
-            }
-        }
-
-        Err(S3Error::NoSuchBucket)
+        self.try_primary_fallback(
+            "HEAD bucket",
+            |e| matches!(e, S3Error::NoSuchBucket),
+            S3Error::NoSuchBucket,
+            |backend| async move { backend.head_bucket().await },
+        )
+        .await
     }
 
     async fn head_bucket_best_effort(&self) -> Result<(), S3Error> {
-        // Try all backends concurrently, return first success
-        tracing::debug!(
-            "HEAD bucket (best effort mode - racing {} backends)",
-            self.backends.len()
-        );
-
-        let tasks: Vec<_> = self
-            .backends
-            .iter()
-            .enumerate()
-            .map(|(idx, backend)| {
-                let backend = Arc::clone(backend);
-                async move {
-                    let result = backend.head_bucket().await;
-                    (idx, result)
-                }
-                .boxed()
-            })
-            .collect();
-
-        let mut futures = tasks.into_iter().collect::<FuturesUnordered<_>>();
-
-        let mut last_error = None;
-        while let Some((idx, result)) = futures.next().await {
-            match result {
-                Ok(()) => {
-                    tracing::debug!("Backend {} won the race and confirmed bucket exists", idx);
-                    // Explicitly drop remaining futures to cancel them
-                    drop(futures);
-                    return Ok(());
-                }
-                Err(S3Error::NoSuchBucket) => {
-                    tracing::debug!("Backend {} returned NoSuchBucket (valid response)", idx);
-                    // NoSuchBucket is a valid response, not an error - return immediately
-                    drop(futures);
-                    return Err(S3Error::NoSuchBucket);
-                }
-                Err(e) => {
-                    tracing::debug!("Backend {} failed in race for HEAD bucket: {}", idx, e);
-                    // Real error - continue trying other backends
-                    last_error = Some(e);
-                }
-            }
-        }
-
-        // All backends failed with real errors
-        Err(last_error.unwrap_or(S3Error::NoSuchBucket))
+        self.race_all_backends(
+            "HEAD bucket",
+            |e| matches!(e, S3Error::NoSuchBucket),
+            S3Error::NoSuchBucket,
+            |backend| async move { backend.head_bucket().await },
+        )
+        .await
     }
 
     async fn head_bucket_all_consistent(&self) -> Result<(), S3Error> {
-        // Verify all backends confirm the bucket exists
-        tracing::debug!(
-            "HEAD bucket (all consistent mode - verifying {} backends)",
-            self.backends.len()
-        );
-
-        let tasks: Vec<_> = self
-            .backends
-            .iter()
-            .enumerate()
-            .map(|(idx, backend)| {
-                let backend = Arc::clone(backend);
-                async move {
-                    let result = backend.head_bucket().await;
-                    (idx, result)
-                }
-                .boxed()
-            })
-            .collect();
-
-        let results = futures::future::join_all(tasks).await;
-
-        // All backends must succeed
-        for (idx, result) in results {
-            if let Err(e) = result {
-                tracing::error!("Backend {} failed HEAD bucket: {}", idx, e);
-                return Err(S3Error::InternalError(format!(
-                    "Consistency check failed: backend {} failed",
-                    idx
-                )));
-            }
-        }
-
-        tracing::debug!("All backends confirmed bucket exists");
-        Ok(())
+        self.verify_all_succeed("HEAD bucket", |backend| async move {
+            backend.head_bucket().await
+        })
+        .await
     }
 }

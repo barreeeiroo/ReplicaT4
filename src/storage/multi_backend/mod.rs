@@ -11,6 +11,7 @@ mod head_bucket;
 mod head_object;
 mod list_objects;
 mod put_object;
+mod utils;
 
 /// Multi-backend storage that replicates operations across multiple backends
 pub struct MultiBackend {
