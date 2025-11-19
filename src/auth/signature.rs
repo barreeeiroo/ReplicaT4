@@ -11,6 +11,12 @@ pub struct AuthorizationInfo {
 }
 
 /// Parse the AWS4-HMAC-SHA256 authorization header
+///
+/// Extracts authentication components from an AWS Signature Version 4 Authorization header.
+/// Expected format: `AWS4-HMAC-SHA256 Credential=..., SignedHeaders=..., Signature=...`
+///
+/// Returns AuthorizationInfo containing access key ID, credential scope, signed headers, and signature.
+/// Returns InvalidRequest error if the header format is invalid or missing required components.
 pub fn parse_authorization_header(header: &str) -> Result<AuthorizationInfo, S3Error> {
     // Format: AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request,
     //         SignedHeaders=host;range;x-amz-date, Signature=fe5f80f77d5fa3beca038a248ff027d0445342fe2855ddc963176630326f1024
@@ -72,6 +78,19 @@ pub fn parse_authorization_header(header: &str) -> Result<AuthorizationInfo, S3E
 }
 
 /// Verify the AWS Signature V4
+///
+/// Validates that the signature in the authorization header matches the expected signature
+/// calculated from the request using the provided credentials.
+///
+/// This function:
+/// 1. Extracts required headers (x-amz-date, x-amz-content-sha256)
+/// 2. Validates the timestamp (allows 15 minute clock skew)
+/// 3. Builds the canonical request
+/// 4. Creates the string to sign
+/// 5. Calculates the expected signature using HMAC-SHA256
+/// 6. Compares with the provided signature
+///
+/// Returns Ok(()) if signature is valid, or SignatureDoesNotMatch/InvalidRequest error otherwise.
 pub fn verify_signature(
     request: &Request<Body>,
     auth_info: &AuthorizationInfo,

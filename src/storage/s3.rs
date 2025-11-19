@@ -97,6 +97,113 @@ impl S3Backend {
 
 #[async_trait::async_trait]
 impl StorageBackend for S3Backend {
+    // Bucket-level operations
+    async fn head_bucket(&self) -> Result<(), S3Error> {
+        tracing::debug!("[{}] Checking bucket existence: {}", self.name, self.bucket);
+
+        let result = self.client.head_bucket().bucket(&self.bucket).send().await;
+
+        match result {
+            Ok(_) => {
+                tracing::debug!("[{}] Bucket exists and is accessible", self.name);
+                Ok(())
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "[{}] Bucket not found or not accessible: {}",
+                    self.name,
+                    err
+                );
+                Err(S3Error::NoSuchBucket)
+            }
+        }
+    }
+
+    async fn list_objects(
+        &self,
+        prefix: Option<&str>,
+        max_keys: i32,
+    ) -> Result<Vec<ObjectMetadata>, S3Error> {
+        tracing::debug!("[{}] Listing objects with prefix: {:?}", self.name, prefix);
+
+        let mut request = self.client.list_objects_v2().bucket(&self.bucket);
+
+        if let Some(p) = prefix {
+            request = request.prefix(p);
+        }
+
+        let result = request.max_keys(max_keys).send().await;
+
+        match result {
+            Ok(output) => {
+                let objects: Vec<ObjectMetadata> = output
+                    .contents()
+                    .iter()
+                    .filter_map(|obj| {
+                        let key = obj.key()?.to_string();
+                        let size = obj.size().unwrap_or(0) as u64;
+                        let etag = obj.e_tag().map(|s| s.to_string()).unwrap_or_default();
+                        let last_modified = obj
+                            .last_modified()
+                            .and_then(|dt| {
+                                let secs = dt.secs();
+                                chrono::DateTime::from_timestamp(secs, 0)
+                            })
+                            .unwrap_or_else(chrono::Utc::now);
+
+                        Some(ObjectMetadata {
+                            key,
+                            size,
+                            etag,
+                            last_modified,
+                            content_type: "binary/octet-stream".to_string(),
+                        })
+                    })
+                    .collect();
+
+                tracing::debug!("[{}] Found {} objects", self.name, objects.len());
+                Ok(objects)
+            }
+            Err(err) => {
+                tracing::error!("[{}] Failed to list objects: {}", self.name, err);
+                Err(S3Error::InternalError(format!(
+                    "Failed to list objects in {}: {}",
+                    self.name, err
+                )))
+            }
+        }
+    }
+
+    // Object-level operations
+    async fn head_object(&self, key: &str) -> Result<ObjectMetadata, S3Error> {
+        tracing::debug!("[{}] Getting metadata for object: {}", self.name, key);
+
+        let result = self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await;
+
+        match result {
+            Ok(output) => {
+                let metadata = Self::extract_metadata(
+                    key,
+                    output.content_length(),
+                    output.e_tag(),
+                    output.last_modified(),
+                    output.content_type(),
+                );
+                Ok(metadata)
+            }
+            Err(_) => {
+                tracing::warn!("[{}] Object not found: {}", self.name, key);
+                Err(S3Error::NoSuchKey)
+            }
+        }
+    }
+
     async fn get_object(&self, key: &str) -> Result<(ObjectStream, ObjectMetadata), S3Error> {
         tracing::debug!("[{}] Getting object: {}", self.name, key);
 
@@ -205,111 +312,6 @@ impl StorageBackend for S3Backend {
                 tracing::error!("[{}] Failed to delete object: {}", self.name, err);
                 // S3 delete is idempotent - returns success even if object doesn't exist
                 Ok(())
-            }
-        }
-    }
-
-    async fn head_object(&self, key: &str) -> Result<ObjectMetadata, S3Error> {
-        tracing::debug!("[{}] Getting metadata for object: {}", self.name, key);
-
-        let result = self
-            .client
-            .head_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .send()
-            .await;
-
-        match result {
-            Ok(output) => {
-                let metadata = Self::extract_metadata(
-                    key,
-                    output.content_length(),
-                    output.e_tag(),
-                    output.last_modified(),
-                    output.content_type(),
-                );
-                Ok(metadata)
-            }
-            Err(_) => {
-                tracing::warn!("[{}] Object not found: {}", self.name, key);
-                Err(S3Error::NoSuchKey)
-            }
-        }
-    }
-
-    async fn list_objects(
-        &self,
-        prefix: Option<&str>,
-        max_keys: i32,
-    ) -> Result<Vec<ObjectMetadata>, S3Error> {
-        tracing::debug!("[{}] Listing objects with prefix: {:?}", self.name, prefix);
-
-        let mut request = self.client.list_objects_v2().bucket(&self.bucket);
-
-        if let Some(p) = prefix {
-            request = request.prefix(p);
-        }
-
-        let result = request.max_keys(max_keys).send().await;
-
-        match result {
-            Ok(output) => {
-                let objects: Vec<ObjectMetadata> = output
-                    .contents()
-                    .iter()
-                    .filter_map(|obj| {
-                        let key = obj.key()?.to_string();
-                        let size = obj.size().unwrap_or(0) as u64;
-                        let etag = obj.e_tag().map(|s| s.to_string()).unwrap_or_default();
-                        let last_modified = obj
-                            .last_modified()
-                            .and_then(|dt| {
-                                let secs = dt.secs();
-                                chrono::DateTime::from_timestamp(secs, 0)
-                            })
-                            .unwrap_or_else(chrono::Utc::now);
-
-                        Some(ObjectMetadata {
-                            key,
-                            size,
-                            etag,
-                            last_modified,
-                            content_type: "binary/octet-stream".to_string(),
-                        })
-                    })
-                    .collect();
-
-                tracing::debug!("[{}] Found {} objects", self.name, objects.len());
-                Ok(objects)
-            }
-            Err(err) => {
-                tracing::error!("[{}] Failed to list objects: {}", self.name, err);
-                Err(S3Error::InternalError(format!(
-                    "Failed to list objects in {}: {}",
-                    self.name, err
-                )))
-            }
-        }
-    }
-
-    async fn head_bucket(&self) -> Result<(), S3Error> {
-        tracing::debug!("[{}] Checking bucket existence: {}", self.name, self.bucket);
-
-        let result = self.client.head_bucket().bucket(&self.bucket).send().await;
-
-        match result {
-            Ok(_) => {
-                tracing::debug!("[{}] Bucket exists and is accessible", self.name);
-                Ok(())
-            }
-            Err(err) => {
-                tracing::warn!(
-                    "[{}] Bucket not found or not accessible: {}",
-                    self.name,
-                    err
-                );
-                Err(S3Error::NoSuchBucket)
             }
         }
     }

@@ -10,6 +10,16 @@ use axum::{
 };
 
 /// AWS Signature V4 authentication middleware
+///
+/// Validates incoming requests using AWS Signature Version 4 authentication.
+/// This middleware:
+/// 1. Extracts and parses the Authorization header
+/// 2. Looks up credentials by access key ID
+/// 3. Verifies the signature matches the expected value
+/// 4. Injects AuthContext into request extensions for downstream handlers
+///
+/// Returns AccessDenied or SignatureDoesNotMatch errors if authentication fails.
+///
 /// Note: app_state must be captured in a closure when creating the middleware layer
 pub async fn auth_middleware(app_state: AppState, mut request: Request, next: Next) -> Response {
     // Extract the Authorization header

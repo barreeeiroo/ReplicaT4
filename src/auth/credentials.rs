@@ -9,12 +9,15 @@ pub struct CredentialsStore {
 }
 
 impl CredentialsStore {
+    /// Create a new credentials store from a map of access key IDs to credentials
     pub fn new(credentials: HashMap<String, Credentials>) -> Self {
         Self {
             credentials: Arc::new(credentials),
         }
     }
 
+    /// Get credentials for a given access key ID
+    /// Returns None if the access key ID is not found
     pub fn get(&self, access_key_id: &str) -> Option<&Credentials> {
         self.credentials.get(access_key_id)
     }

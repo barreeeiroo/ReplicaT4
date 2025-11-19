@@ -34,6 +34,48 @@ impl InMemoryStorage {
 
 #[async_trait::async_trait]
 impl StorageBackend for InMemoryStorage {
+    // Bucket-level operations
+    async fn head_bucket(&self) -> Result<(), S3Error> {
+        // In-memory storage always has the bucket available
+        Ok(())
+    }
+
+    async fn list_objects(
+        &self,
+        prefix: Option<&str>,
+        max_keys: i32,
+    ) -> Result<Vec<ObjectMetadata>, S3Error> {
+        let objects = self.objects.read().await;
+
+        let mut results: Vec<ObjectMetadata> = objects
+            .iter()
+            .filter_map(|(key, obj)| {
+                if let Some(prefix_str) = prefix
+                    && !key.starts_with(prefix_str)
+                {
+                    return None;
+                }
+
+                Some(obj.metadata.clone())
+            })
+            .collect();
+
+        results.sort_by(|a, b| a.key.cmp(&b.key));
+        results.truncate(max_keys as usize);
+
+        Ok(results)
+    }
+
+    // Object-level operations
+    async fn head_object(&self, key: &str) -> Result<ObjectMetadata, S3Error> {
+        let objects = self.objects.read().await;
+
+        objects
+            .get(key)
+            .map(|obj| obj.metadata.clone())
+            .ok_or(S3Error::NoSuchKey)
+    }
+
     async fn get_object(&self, key: &str) -> Result<(ObjectStream, ObjectMetadata), S3Error> {
         let objects = self.objects.read().await;
 
@@ -80,46 +122,6 @@ impl StorageBackend for InMemoryStorage {
         objects.remove(key);
 
         // S3 returns success even if object doesn't exist
-        Ok(())
-    }
-
-    async fn head_object(&self, key: &str) -> Result<ObjectMetadata, S3Error> {
-        let objects = self.objects.read().await;
-
-        objects
-            .get(key)
-            .map(|obj| obj.metadata.clone())
-            .ok_or(S3Error::NoSuchKey)
-    }
-
-    async fn list_objects(
-        &self,
-        prefix: Option<&str>,
-        max_keys: i32,
-    ) -> Result<Vec<ObjectMetadata>, S3Error> {
-        let objects = self.objects.read().await;
-
-        let mut results: Vec<ObjectMetadata> = objects
-            .iter()
-            .filter_map(|(key, obj)| {
-                if let Some(prefix_str) = prefix
-                    && !key.starts_with(prefix_str)
-                {
-                    return None;
-                }
-
-                Some(obj.metadata.clone())
-            })
-            .collect();
-
-        results.sort_by(|a, b| a.key.cmp(&b.key));
-        results.truncate(max_keys as usize);
-
-        Ok(results)
-    }
-
-    async fn head_bucket(&self) -> Result<(), S3Error> {
-        // In-memory storage always has the bucket available
         Ok(())
     }
 }
