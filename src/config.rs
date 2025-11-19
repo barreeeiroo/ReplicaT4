@@ -6,15 +6,21 @@ use std::path::Path;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ReadMode {
+    /// Only read from primary backend (or first if no primary specified)
+    PrimaryOnly,
+    /// Try primary first, fallback to other backends on failure
+    PrimaryFallback,
+    /// Try any backend to find the object
     BestEffort,
-    Consistent,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum WriteMode {
-    BestEffort,
-    Consistent,
+    /// Write to primary/first backend immediately, replicate to others asynchronously
+    AsyncReplication,
+    /// Write to all backends synchronously, all must succeed
+    MultiSync,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,14 +122,14 @@ mod tests {
                     "bucket": "my-bucket"
                 }
             ],
-            "readMode": "BEST_EFFORT",
-            "writeMode": "BEST_EFFORT"
+            "readMode": "PRIMARY_FALLBACK",
+            "writeMode": "ASYNC_REPLICATION"
         }"#;
 
         let config: Config = serde_json::from_str(json).unwrap();
         assert_eq!(config.backends.len(), 1);
-        assert_eq!(config.read_mode, ReadMode::BestEffort);
-        assert_eq!(config.write_mode, WriteMode::BestEffort);
+        assert_eq!(config.read_mode, ReadMode::PrimaryFallback);
+        assert_eq!(config.write_mode, WriteMode::AsyncReplication);
         assert!(config.primary_backend_name.is_none());
 
         match &config.backends[0] {
@@ -155,13 +161,13 @@ mod tests {
                     "secret_access_key": "minioadmin"
                 }
             ],
-            "readMode": "CONSISTENT",
-            "writeMode": "CONSISTENT"
+            "readMode": "PRIMARY_ONLY",
+            "writeMode": "MULTI_SYNC"
         }"#;
 
         let config: Config = serde_json::from_str(json).unwrap();
-        assert_eq!(config.read_mode, ReadMode::Consistent);
-        assert_eq!(config.write_mode, WriteMode::Consistent);
+        assert_eq!(config.read_mode, ReadMode::PrimaryOnly);
+        assert_eq!(config.write_mode, WriteMode::MultiSync);
 
         match &config.backends[0] {
             BackendConfig::S3(s3_config) => {
@@ -187,8 +193,8 @@ mod tests {
                     "name": "in-memory"
                 }
             ],
-            "readMode": "BEST_EFFORT",
-            "writeMode": "BEST_EFFORT"
+            "readMode": "PRIMARY_FALLBACK",
+            "writeMode": "ASYNC_REPLICATION"
         }"#;
 
         let config: Config = serde_json::from_str(json).unwrap();
@@ -224,14 +230,14 @@ mod tests {
                 }
             ],
             "readMode": "BEST_EFFORT",
-            "writeMode": "CONSISTENT",
+            "writeMode": "MULTI_SYNC",
             "primaryBackendName": "aws"
         }"#;
 
         let config: Config = serde_json::from_str(json).unwrap();
         assert_eq!(config.backends.len(), 3);
         assert_eq!(config.read_mode, ReadMode::BestEffort);
-        assert_eq!(config.write_mode, WriteMode::Consistent);
+        assert_eq!(config.write_mode, WriteMode::MultiSync);
         assert_eq!(config.primary_backend_name, Some("aws".to_string()));
 
         assert!(matches!(config.backends[0], BackendConfig::S3(_)));
@@ -249,8 +255,8 @@ mod tests {
                     "name": "test"
                 }
             ],
-            "readMode": "BEST_EFFORT",
-            "writeMode": "BEST_EFFORT"
+            "readMode": "PRIMARY_FALLBACK",
+            "writeMode": "ASYNC_REPLICATION"
         }"#;
 
         let config: Config = serde_json::from_str(json).unwrap();
@@ -266,8 +272,8 @@ mod tests {
                     "name": "test"
                 }
             ],
-            "readMode": "BEST_EFFORT",
-            "writeMode": "BEST_EFFORT"
+            "readMode": "PRIMARY_FALLBACK",
+            "writeMode": "ASYNC_REPLICATION"
         }"#;
 
         let config: Config = serde_json::from_str(json).unwrap();
@@ -320,8 +326,8 @@ mod tests {
                     "name": "test"
                 }
             ],
-            "readMode": "BEST_EFFORT",
-            "writeMode": "BEST_EFFORT"
+            "readMode": "PRIMARY_FALLBACK",
+            "writeMode": "ASYNC_REPLICATION"
         }"#;
 
         let mut temp_file = NamedTempFile::new().unwrap();
@@ -361,8 +367,8 @@ mod tests {
                 access_key_id: None,
                 secret_access_key: None,
             })],
-            read_mode: ReadMode::BestEffort,
-            write_mode: WriteMode::Consistent,
+            read_mode: ReadMode::PrimaryFallback,
+            write_mode: WriteMode::MultiSync,
             primary_backend_name: None,
         };
 
@@ -370,8 +376,8 @@ mod tests {
         let parsed: Config = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed.backends.len(), 1);
-        assert_eq!(parsed.read_mode, ReadMode::BestEffort);
-        assert_eq!(parsed.write_mode, WriteMode::Consistent);
+        assert_eq!(parsed.read_mode, ReadMode::PrimaryFallback);
+        assert_eq!(parsed.write_mode, WriteMode::MultiSync);
         match &parsed.backends[0] {
             BackendConfig::S3(s3) => {
                 assert_eq!(s3.name, "test");
@@ -394,8 +400,8 @@ mod tests {
                 access_key_id: None,
                 secret_access_key: None,
             })],
-            read_mode: ReadMode::BestEffort,
-            write_mode: WriteMode::BestEffort,
+            read_mode: ReadMode::PrimaryFallback,
+            write_mode: WriteMode::AsyncReplication,
             primary_backend_name: None,
         };
 
@@ -426,8 +432,8 @@ mod tests {
                     "bucket": "bucket2"
                 }
             ],
-            "readMode": "BEST_EFFORT",
-            "writeMode": "BEST_EFFORT"
+            "readMode": "PRIMARY_FALLBACK",
+            "writeMode": "ASYNC_REPLICATION"
         }"#;
 
         let result: Result<Config, _> = serde_json::from_str(json);
@@ -452,8 +458,8 @@ mod tests {
                     "bucket": "bucket1"
                 }
             ],
-            "readMode": "BEST_EFFORT",
-            "writeMode": "BEST_EFFORT",
+            "readMode": "PRIMARY_FALLBACK",
+            "writeMode": "ASYNC_REPLICATION",
             "primaryBackendName": "nonexistent"
         }"#;
 
@@ -485,8 +491,8 @@ mod tests {
                     "bucket": "bucket2"
                 }
             ],
-            "readMode": "BEST_EFFORT",
-            "writeMode": "BEST_EFFORT",
+            "readMode": "PRIMARY_FALLBACK",
+            "writeMode": "ASYNC_REPLICATION",
             "primaryBackendName": "backend1"
         }"#;
 

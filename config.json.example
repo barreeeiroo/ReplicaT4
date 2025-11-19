@@ -1,7 +1,7 @@
 {
   "virtualBucket": "mybucket",
-  "readMode": "BEST_EFFORT",
-  "writeMode": "CONSISTENT",
+  "readMode": "PRIMARY_FALLBACK",
+  "writeMode": "MULTI_SYNC",
   "primaryBackendName": "aws-s3-primary",
   "backends": [
     {

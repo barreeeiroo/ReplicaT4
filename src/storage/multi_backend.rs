@@ -102,7 +102,12 @@ impl StorageBackend for MultiBackend {
 
     async fn head_object(&self, key: &str) -> Result<ObjectMetadata, S3Error> {
         match self.read_mode {
-            ReadMode::BestEffort => {
+            ReadMode::PrimaryOnly => {
+                // Only read from primary or first backend
+                tracing::debug!("HEAD object (primary only mode)");
+                self.primary_or_first().head_object(key).await
+            }
+            ReadMode::PrimaryFallback => {
                 // Try primary first, then fallback to others
                 if let Some(primary) = self.primary() {
                     tracing::debug!("HEAD object (trying primary backend first)");
@@ -127,17 +132,34 @@ impl StorageBackend for MultiBackend {
 
                 Err(S3Error::NoSuchKey)
             }
-            ReadMode::Consistent => {
-                // Only read from primary
-                tracing::debug!("HEAD object (consistent mode - primary only)");
-                self.primary_or_first().head_object(key).await
+            ReadMode::BestEffort => {
+                // Try all backends, return first success
+                tracing::debug!("HEAD object (best effort mode - trying all backends)");
+                for (idx, backend) in self.backends.iter().enumerate() {
+                    match backend.head_object(key).await {
+                        Ok(metadata) => {
+                            tracing::debug!("Backend {} returned object metadata", idx);
+                            return Ok(metadata);
+                        }
+                        Err(e) => {
+                            tracing::debug!("Backend {} failed for HEAD {}: {}", idx, key, e);
+                        }
+                    }
+                }
+
+                Err(S3Error::NoSuchKey)
             }
         }
     }
 
     async fn get_object(&self, key: &str) -> Result<(ObjectStream, ObjectMetadata), S3Error> {
         match self.read_mode {
-            ReadMode::BestEffort => {
+            ReadMode::PrimaryOnly => {
+                // Only read from primary or first backend
+                tracing::debug!("GET object (primary only mode)");
+                self.primary_or_first().get_object(key).await
+            }
+            ReadMode::PrimaryFallback => {
                 // Try primary first, then fallback to others
                 if let Some(primary) = self.primary() {
                     tracing::debug!("GET object (trying primary backend first)");
@@ -162,10 +184,22 @@ impl StorageBackend for MultiBackend {
 
                 Err(S3Error::NoSuchKey)
             }
-            ReadMode::Consistent => {
-                // Only read from primary
-                tracing::debug!("GET object (consistent mode - primary only)");
-                self.primary_or_first().get_object(key).await
+            ReadMode::BestEffort => {
+                // Try all backends, return first success
+                tracing::debug!("GET object (best effort mode - trying all backends)");
+                for (idx, backend) in self.backends.iter().enumerate() {
+                    match backend.get_object(key).await {
+                        Ok(result) => {
+                            tracing::debug!("Backend {} returned object", idx);
+                            return Ok(result);
+                        }
+                        Err(e) => {
+                            tracing::debug!("Backend {} failed for GET {}: {}", idx, key, e);
+                        }
+                    }
+                }
+
+                Err(S3Error::NoSuchKey)
             }
         }
     }
@@ -178,73 +212,79 @@ impl StorageBackend for MultiBackend {
         tracing::debug!("PUT object: collected {} bytes", data.len());
 
         match self.write_mode {
-            WriteMode::BestEffort => {
-                // Write to all backends concurrently
+            WriteMode::AsyncReplication => {
+                // Write to primary/first backend immediately
+                let primary = self.primary_or_first();
                 tracing::info!(
-                    "PUT object (best effort): writing to {} backends",
-                    self.backends.len()
+                    "PUT object (async replication): writing to primary/first backend immediately"
                 );
 
-                let tasks: Vec<_> = self
-                    .backends
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, backend)| {
-                        let backend = Arc::clone(backend);
-                        let key = key.to_string();
-                        let data = data.clone();
-                        async move {
-                            let stream = Self::bytes_to_stream(data);
-                            let result = backend.put_object(&key, stream).await;
-                            (idx, result)
-                        }
-                    })
-                    .collect();
+                let stream = Self::bytes_to_stream(data.clone());
+                let etag = primary.put_object(key, stream).await?;
 
-                let results = futures::future::join_all(tasks).await;
+                tracing::info!("Primary backend successfully wrote object {}", key);
 
-                // Count successes and failures
-                let mut success_count = 0;
-                let mut primary_etag: Option<String> = None;
-                let mut any_etag: Option<String> = None;
-
-                for (idx, result) in results {
-                    match result {
-                        Ok(etag) => {
-                            success_count += 1;
-                            if Some(idx) == self.primary_index {
-                                primary_etag = Some(etag.clone());
+                // Spawn background tasks to replicate to other backends
+                if self.backends.len() > 1 {
+                    let other_backends: Vec<_> = self
+                        .backends
+                        .iter()
+                        .enumerate()
+                        .filter(|(idx, _)| {
+                            // Skip primary backend
+                            if let Some(primary_idx) = self.primary_index {
+                                *idx != primary_idx
+                            } else {
+                                *idx != 0 // Skip first backend if no primary
                             }
-                            if any_etag.is_none() {
-                                any_etag = Some(etag);
+                        })
+                        .map(|(idx, backend)| (idx, Arc::clone(backend)))
+                        .collect();
+
+                    if !other_backends.is_empty() {
+                        tracing::info!(
+                            "Spawning background tasks to replicate to {} other backends",
+                            other_backends.len()
+                        );
+
+                        let key_clone = key.to_string();
+                        tokio::spawn(async move {
+                            for (idx, backend) in other_backends {
+                                let backend_clone = Arc::clone(&backend);
+                                let key = key_clone.clone();
+                                let data = data.clone();
+
+                                tokio::spawn(async move {
+                                    let stream = Self::bytes_to_stream(data);
+                                    match backend_clone.put_object(&key, stream).await {
+                                        Ok(_) => {
+                                            tracing::info!(
+                                                "Background replication: backend {} successfully wrote object {}",
+                                                idx,
+                                                key
+                                            );
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(
+                                                "Background replication: backend {} failed to write object {}: {}",
+                                                idx,
+                                                key,
+                                                e
+                                            );
+                                        }
+                                    }
+                                });
                             }
-                            tracing::info!("Backend {} successfully wrote object {}", idx, key);
-                        }
-                        Err(e) => {
-                            tracing::error!("Backend {} failed to write object {}: {}", idx, key, e);
-                        }
+                        });
                     }
                 }
 
-                if success_count == 0 {
-                    return Err(S3Error::InternalError(
-                        "All backends failed to write object".to_string(),
-                    ));
-                }
-
-                tracing::info!(
-                    "PUT object (best effort): {}/{} backends succeeded",
-                    success_count,
-                    self.backends.len()
-                );
-
-                // Return primary etag if available, otherwise any successful etag
-                Ok(primary_etag.or(any_etag).unwrap())
+                Ok(etag)
             }
-            WriteMode::Consistent => {
+            WriteMode::MultiSync => {
                 // Write to all backends concurrently, all must succeed
                 tracing::info!(
-                    "PUT object (consistent): writing to {} backends (all must succeed)",
+                    "PUT object (multi sync): writing to {} backends (all must succeed)",
                     self.backends.len()
                 );
 
@@ -278,14 +318,14 @@ impl StorageBackend for MultiBackend {
                             tracing::error!("Backend {} failed to write object {}: {}", idx, key, e);
                             // TODO: Implement rollback - delete from successful backends
                             return Err(S3Error::InternalError(format!(
-                                "Backend {} failed in consistent mode: {}",
+                                "Backend {} failed in multi sync mode: {}",
                                 idx, e
                             )));
                         }
                     }
                 }
 
-                tracing::info!("PUT object (consistent): all backends succeeded");
+                tracing::info!("PUT object (multi sync): all backends succeeded");
 
                 // Return primary etag if available, otherwise first etag
                 if let Some(primary_idx) = self.primary_index {
@@ -299,47 +339,75 @@ impl StorageBackend for MultiBackend {
 
     async fn delete_object(&self, key: &str) -> Result<(), S3Error> {
         match self.write_mode {
-            WriteMode::BestEffort => {
-                // Delete from all backends concurrently
+            WriteMode::AsyncReplication => {
+                // Delete from primary/first backend immediately
+                let primary = self.primary_or_first();
                 tracing::info!(
-                    "DELETE object (best effort): deleting from {} backends",
-                    self.backends.len()
+                    "DELETE object (async replication): deleting from primary/first backend immediately"
                 );
 
-                let tasks: Vec<_> = self
-                    .backends
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, backend)| {
-                        let backend = Arc::clone(backend);
-                        let key = key.to_string();
-                        async move {
-                            let result = backend.delete_object(&key).await;
-                            (idx, result)
-                        }
-                    })
-                    .collect();
+                primary.delete_object(key).await?;
+                tracing::info!("Primary backend successfully deleted object {}", key);
 
-                let results = futures::future::join_all(tasks).await;
+                // Spawn background tasks to delete from other backends
+                if self.backends.len() > 1 {
+                    let other_backends: Vec<_> = self
+                        .backends
+                        .iter()
+                        .enumerate()
+                        .filter(|(idx, _)| {
+                            // Skip primary backend
+                            if let Some(primary_idx) = self.primary_index {
+                                *idx != primary_idx
+                            } else {
+                                *idx != 0 // Skip first backend if no primary
+                            }
+                        })
+                        .map(|(idx, backend)| (idx, Arc::clone(backend)))
+                        .collect();
 
-                // Log failures but always succeed (S3 semantics: delete is idempotent)
-                for (idx, result) in results {
-                    match result {
-                        Ok(_) => {
-                            tracing::info!("Backend {} successfully deleted object {}", idx, key);
-                        }
-                        Err(e) => {
-                            tracing::warn!("Backend {} failed to delete object {}: {}", idx, key, e);
-                        }
+                    if !other_backends.is_empty() {
+                        tracing::info!(
+                            "Spawning background tasks to delete from {} other backends",
+                            other_backends.len()
+                        );
+
+                        let key_clone = key.to_string();
+                        tokio::spawn(async move {
+                            for (idx, backend) in other_backends {
+                                let backend_clone = Arc::clone(&backend);
+                                let key = key_clone.clone();
+
+                                tokio::spawn(async move {
+                                    match backend_clone.delete_object(&key).await {
+                                        Ok(_) => {
+                                            tracing::info!(
+                                                "Background deletion: backend {} successfully deleted object {}",
+                                                idx,
+                                                key
+                                            );
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(
+                                                "Background deletion: backend {} failed to delete object {}: {}",
+                                                idx,
+                                                key,
+                                                e
+                                            );
+                                        }
+                                    }
+                                });
+                            }
+                        });
                     }
                 }
 
                 Ok(())
             }
-            WriteMode::Consistent => {
+            WriteMode::MultiSync => {
                 // Delete from all backends concurrently, all must succeed
                 tracing::info!(
-                    "DELETE object (consistent): deleting from {} backends (all must succeed)",
+                    "DELETE object (multi sync): deleting from {} backends (all must succeed)",
                     self.backends.len()
                 );
 
@@ -368,14 +436,14 @@ impl StorageBackend for MultiBackend {
                         Err(e) => {
                             tracing::error!("Backend {} failed to delete object {}: {}", idx, key, e);
                             return Err(S3Error::InternalError(format!(
-                                "Backend {} failed to delete in consistent mode: {}",
+                                "Backend {} failed to delete in multi sync mode: {}",
                                 idx, e
                             )));
                         }
                     }
                 }
 
-                tracing::info!("DELETE object (consistent): all backends succeeded");
+                tracing::info!("DELETE object (multi sync): all backends succeeded");
                 Ok(())
             }
         }
@@ -401,8 +469,8 @@ mod tests {
         let multi = MultiBackend::new(
             vec![backend1.clone(), backend2.clone()],
             Some(0), // backend1 is primary (index 0)
-            ReadMode::BestEffort,
-            WriteMode::BestEffort,
+            ReadMode::PrimaryFallback,
+            WriteMode::AsyncReplication,
         );
 
         let key = "test-key";
@@ -439,8 +507,8 @@ mod tests {
         let multi = MultiBackend::new(
             vec![backend1.clone(), backend2.clone()],
             None, // no primary
-            ReadMode::Consistent,
-            WriteMode::Consistent,
+            ReadMode::PrimaryOnly,
+            WriteMode::MultiSync,
         );
 
         let key = "test-key";
@@ -466,8 +534,8 @@ mod tests {
         let multi = MultiBackend::new(
             vec![backend1.clone(), backend2.clone()],
             None,
-            ReadMode::BestEffort,
-            WriteMode::BestEffort,
+            ReadMode::PrimaryFallback,
+            WriteMode::AsyncReplication,
         );
 
         let key = "test-key";
@@ -493,8 +561,8 @@ mod tests {
         let multi = MultiBackend::new(
             vec![backend1.clone(), backend2.clone()],
             Some(0), // backend1 is primary
-            ReadMode::BestEffort,
-            WriteMode::BestEffort,
+            ReadMode::PrimaryFallback,
+            WriteMode::AsyncReplication,
         );
 
         let key = "test-key";
@@ -524,8 +592,8 @@ mod tests {
         let multi = MultiBackend::new(
             vec![backend1.clone(), backend2.clone()],
             Some(1), // backend2 is primary (index 1)
-            ReadMode::Consistent,
-            WriteMode::Consistent,
+            ReadMode::PrimaryOnly,
+            WriteMode::MultiSync,
         );
 
         assert_eq!(multi.primary_index, Some(1));
@@ -539,8 +607,8 @@ mod tests {
         let multi = MultiBackend::new(
             vec![backend1.clone(), backend2.clone()],
             Some(0), // backend1 is primary
-            ReadMode::BestEffort,
-            WriteMode::BestEffort,
+            ReadMode::PrimaryFallback,
+            WriteMode::AsyncReplication,
         );
 
         // Put objects through multi-backend
