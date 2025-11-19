@@ -2,7 +2,7 @@ use crate::storage::backend::{ObjectStream, StorageBackend};
 use crate::types::{ObjectMetadata, error::S3Error};
 use aws_sdk_s3::Client as S3Client;
 use aws_sdk_s3::primitives::ByteStream;
-use bytes::Bytes;
+use bytes::BytesMut;
 use futures::stream::StreamExt;
 use http_body_util::BodyExt;
 use sha2::{Digest, Sha256};
@@ -139,29 +139,40 @@ impl StorageBackend for S3Backend {
         }
     }
 
-    async fn put_object(&self, key: &str, data: Bytes) -> Result<String, S3Error> {
-        tracing::debug!(
-            "[{}] Putting object: {} ({} bytes)",
-            self.name,
-            key,
-            data.len()
-        );
+    async fn put_object(
+        &self,
+        key: &str,
+        mut body: crate::storage::backend::ObjectStream,
+    ) -> Result<String, S3Error> {
+        tracing::debug!("[{}] Putting object: {}", self.name, key);
 
-        let etag = Self::calculate_etag(&data);
-        let body = ByteStream::from(data);
+        // Collect the streaming body into Bytes
+        let mut data = BytesMut::new();
+        while let Some(chunk) = body.next().await {
+            let chunk = chunk?;
+            data.extend_from_slice(&chunk);
+        }
+        let data = data.freeze();
+
+        let body_stream = ByteStream::from(data);
 
         let result = self
             .client
             .put_object()
             .bucket(&self.bucket)
             .key(key)
-            .body(body)
+            .body(body_stream)
             .send()
             .await;
 
         match result {
-            Ok(_) => {
+            Ok(output) => {
                 tracing::info!("[{}] Successfully stored object: {}", self.name, key);
+                // Get ETag from S3 response
+                let etag = output
+                    .e_tag()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| Self::calculate_etag(&[]));
                 Ok(etag)
             }
             Err(err) => {
@@ -285,12 +296,7 @@ impl StorageBackend for S3Backend {
     async fn head_bucket(&self) -> Result<(), S3Error> {
         tracing::debug!("[{}] Checking bucket existence: {}", self.name, self.bucket);
 
-        let result = self
-            .client
-            .head_bucket()
-            .bucket(&self.bucket)
-            .send()
-            .await;
+        let result = self.client.head_bucket().bucket(&self.bucket).send().await;
 
         match result {
             Ok(_) => {
@@ -298,7 +304,11 @@ impl StorageBackend for S3Backend {
                 Ok(())
             }
             Err(err) => {
-                tracing::warn!("[{}] Bucket not found or not accessible: {}", self.name, err);
+                tracing::warn!(
+                    "[{}] Bucket not found or not accessible: {}",
+                    self.name,
+                    err
+                );
                 Err(S3Error::NoSuchBucket)
             }
         }

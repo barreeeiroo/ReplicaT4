@@ -1,7 +1,7 @@
 use super::backend::{ObjectStream, StorageBackend};
 use crate::types::{ObjectMetadata, error::S3Error};
-use bytes::Bytes;
-use futures::stream;
+use bytes::{Bytes, BytesMut};
+use futures::stream::{self, StreamExt};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -48,7 +48,15 @@ impl StorageBackend for InMemoryStorage {
         Ok((stream, metadata))
     }
 
-    async fn put_object(&self, key: &str, data: Bytes) -> Result<String, S3Error> {
+    async fn put_object(&self, key: &str, mut body: ObjectStream) -> Result<String, S3Error> {
+        // Collect the streaming body into Bytes
+        let mut data = BytesMut::new();
+        while let Some(chunk) = body.next().await {
+            let chunk = chunk?;
+            data.extend_from_slice(&chunk);
+        }
+        let data = data.freeze();
+
         let etag = Self::calculate_etag(&data);
 
         let metadata = ObjectMetadata {
@@ -121,13 +129,21 @@ mod tests {
     use super::*;
     use futures::StreamExt;
 
+    // Helper function to convert Bytes to ObjectStream for tests
+    fn bytes_to_stream(data: Bytes) -> ObjectStream {
+        Box::pin(stream::once(async move { Ok(data) }))
+    }
+
     #[tokio::test]
     async fn test_put_and_get_object() {
         let storage = InMemoryStorage::new();
         let key = "test-key";
         let data = Bytes::from("Hello, World!");
 
-        let etag = storage.put_object(key, data.clone()).await.unwrap();
+        let etag = storage
+            .put_object(key, bytes_to_stream(data.clone()))
+            .await
+            .unwrap();
         assert!(!etag.is_empty());
 
         let (mut stream, metadata) = storage.get_object(key).await.unwrap();
@@ -155,7 +171,10 @@ mod tests {
         let storage = InMemoryStorage::new();
         let key = "test-key";
 
-        storage.put_object(key, Bytes::from("data")).await.unwrap();
+        storage
+            .put_object(key, bytes_to_stream(Bytes::from("data")))
+            .await
+            .unwrap();
         storage.delete_object(key).await.unwrap();
 
         assert!(matches!(
@@ -169,15 +188,15 @@ mod tests {
         let storage = InMemoryStorage::new();
 
         storage
-            .put_object("photos/a.jpg", Bytes::from("1"))
+            .put_object("photos/a.jpg", bytes_to_stream(Bytes::from("1")))
             .await
             .unwrap();
         storage
-            .put_object("photos/b.jpg", Bytes::from("2"))
+            .put_object("photos/b.jpg", bytes_to_stream(Bytes::from("2")))
             .await
             .unwrap();
         storage
-            .put_object("docs/c.pdf", Bytes::from("3"))
+            .put_object("docs/c.pdf", bytes_to_stream(Bytes::from("3")))
             .await
             .unwrap();
 

@@ -8,7 +8,9 @@ mod types;
 use app_state::AppState;
 use auth::{CredentialsStore, auth_middleware};
 use config::{BackendConfig, Config};
-use handlers::{delete_object, get_object, head_bucket, head_object, list_objects, not_found, put_object};
+use handlers::{
+    delete_object, get_object, head_bucket, head_object, list_objects, not_found, put_object,
+};
 use storage::{InMemoryStorage, S3Backend, StorageBackend};
 use types::Credentials;
 
