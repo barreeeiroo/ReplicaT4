@@ -39,3 +39,7 @@ aws-sdk-s3 = "~1.112"
 
 # Configuration file parsing
 serde_json = "~1.0"
+
+[dev-dependencies]
+tower = "~0.5"
+tempfile = "~3.23"

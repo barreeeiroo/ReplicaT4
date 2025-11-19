@@ -206,4 +206,13 @@ mod tests {
         assert_eq!(objects.len(), 2);
         assert!(objects[0].key.starts_with("photos/"));
     }
+
+    #[tokio::test]
+    async fn test_head_bucket() {
+        let storage = InMemoryStorage::new();
+
+        // In-memory storage always returns success for head_bucket
+        let result = storage.head_bucket().await;
+        assert!(result.is_ok());
+    }
 }

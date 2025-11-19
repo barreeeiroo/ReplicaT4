@@ -367,4 +367,394 @@ mod tests {
         let result = canonicalize_query_string("z=1&a=2");
         assert_eq!(result, "a=2&z=1");
     }
+
+    #[test]
+    fn test_parse_missing_signed_headers() {
+        let header = "AWS4-HMAC-SHA256 Credential=KEY/a/b/c/d,Signature=abc";
+        assert!(matches!(
+            parse_authorization_header(header),
+            Err(S3Error::InvalidRequest(_))
+        ));
+    }
+
+    #[test]
+    fn test_parse_missing_signature() {
+        let header = "AWS4-HMAC-SHA256 Credential=KEY/a/b/c/d,SignedHeaders=host";
+        assert!(matches!(
+            parse_authorization_header(header),
+            Err(S3Error::InvalidRequest(_))
+        ));
+    }
+
+    #[test]
+    fn test_parse_invalid_credential_format() {
+        let header = "AWS4-HMAC-SHA256 Credential=INVALIDFORMAT,SignedHeaders=host,Signature=abc";
+        assert!(matches!(
+            parse_authorization_header(header),
+            Err(S3Error::InvalidRequest(_))
+        ));
+    }
+
+    #[test]
+    fn test_parse_with_whitespace() {
+        let header = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=abc123";
+        let result = parse_authorization_header(header);
+        assert!(result.is_ok());
+
+        let auth_info = result.unwrap();
+        assert_eq!(auth_info.access_key_id, "AKIAIOSFODNN7EXAMPLE");
+        assert_eq!(auth_info.signature, "abc123");
+    }
+
+    #[test]
+    fn test_canonicalize_query_string_multiple_values() {
+        let result = canonicalize_query_string("foo=bar&foo=baz");
+        assert_eq!(result, "foo=bar&foo=baz");
+    }
+
+    #[test]
+    fn test_canonicalize_query_string_empty_value() {
+        let result = canonicalize_query_string("foo=");
+        assert_eq!(result, "foo=");
+    }
+
+    #[test]
+    fn test_canonicalize_query_string_no_value() {
+        let result = canonicalize_query_string("foo");
+        assert_eq!(result, "foo=");
+    }
+
+    #[test]
+    fn test_canonicalize_query_string_encoded() {
+        let result = canonicalize_query_string("key=hello%20world");
+        assert_eq!(result, "key=hello%20world");
+    }
+
+    #[test]
+    fn test_canonicalize_query_string_complex_sorting() {
+        let result = canonicalize_query_string("z=1&a=3&a=2&b=1");
+        assert_eq!(result, "a=2&a=3&b=1&z=1");
+    }
+
+    #[test]
+    fn test_build_canonical_headers() {
+        use axum::http::HeaderMap;
+
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "example.com".parse().unwrap());
+        headers.insert("x-amz-date", "20240101T120000Z".parse().unwrap());
+
+        let signed_headers = vec!["host".to_string(), "x-amz-date".to_string()];
+        let canonical = build_canonical_headers(&headers, &signed_headers);
+
+        assert!(canonical.contains("host:example.com\n"));
+        assert!(canonical.contains("x-amz-date:20240101T120000Z\n"));
+    }
+
+    #[test]
+    fn test_build_canonical_headers_trimming() {
+        use axum::http::HeaderMap;
+
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "  example.com  ".parse().unwrap());
+
+        let signed_headers = vec!["host".to_string()];
+        let canonical = build_canonical_headers(&headers, &signed_headers);
+
+        assert_eq!(canonical, "host:example.com\n");
+    }
+
+    #[test]
+    fn test_build_canonical_headers_missing_header() {
+        use axum::http::HeaderMap;
+
+        let headers = HeaderMap::new();
+        let signed_headers = vec!["host".to_string()];
+        let canonical = build_canonical_headers(&headers, &signed_headers);
+
+        // Should handle missing headers gracefully
+        assert_eq!(canonical, "");
+    }
+
+    #[test]
+    fn test_build_string_to_sign() {
+        let canonical_request = "GET\n/\n\nhost:example.com\n\nhost\nHASH";
+        let amz_date = "20240101T120000Z";
+        let credential_scope = "20240101/us-east-1/s3/aws4_request";
+
+        let string_to_sign = build_string_to_sign(canonical_request, amz_date, credential_scope);
+
+        assert!(string_to_sign.starts_with("AWS4-HMAC-SHA256\n"));
+        assert!(string_to_sign.contains(amz_date));
+        assert!(string_to_sign.contains(credential_scope));
+    }
+
+    #[test]
+    fn test_hmac_sha256() {
+        let key = b"key";
+        let data = b"data";
+        let result = hmac_sha256(key, data);
+
+        assert!(result.is_ok());
+        assert!(!result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_calculate_signature() {
+        let secret_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+        let amz_date = "20240101T120000Z";
+        let string_to_sign =
+            "AWS4-HMAC-SHA256\n20240101T120000Z\n20240101/us-east-1/s3/aws4_request\nabc123";
+
+        let result = calculate_signature(secret_key, amz_date, string_to_sign);
+
+        assert!(result.is_ok());
+        let signature = result.unwrap();
+        assert_eq!(signature.len(), 64); // SHA256 hex is 64 characters
+    }
+
+    #[test]
+    fn test_validate_timestamp_valid() {
+        use chrono::Utc;
+
+        let now = Utc::now();
+        let timestamp = now.format("%Y%m%dT%H%M%SZ").to_string();
+
+        let result = validate_timestamp(&timestamp);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_timestamp_invalid_format() {
+        let result = validate_timestamp("invalid");
+        assert!(matches!(result, Err(S3Error::InvalidRequest(_))));
+    }
+
+    #[test]
+    fn test_validate_timestamp_too_old() {
+        // A timestamp from 30 minutes ago (should fail with 15 minute tolerance)
+        let old_timestamp = "20200101T000000Z";
+        let result = validate_timestamp(old_timestamp);
+        assert!(matches!(result, Err(S3Error::InvalidRequest(_))));
+    }
+
+    #[test]
+    fn test_build_canonical_request_simple() {
+        use axum::http::{Method, Request};
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("https://example.com/test")
+            .header("host", "example.com")
+            .header("x-amz-date", "20240101T120000Z")
+            .body(Body::empty())
+            .unwrap();
+
+        let signed_headers = vec!["host".to_string(), "x-amz-date".to_string()];
+        let content_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"; // Empty body hash
+
+        let result = build_canonical_request(&request, &signed_headers, content_hash);
+        assert!(result.is_ok());
+
+        let canonical = result.unwrap();
+        assert!(canonical.starts_with("GET\n"));
+        assert!(canonical.contains("/test\n"));
+        assert!(canonical.contains("host:example.com\n"));
+        assert!(canonical.contains("x-amz-date:20240101T120000Z\n"));
+        assert!(canonical.contains("\nhost;x-amz-date\n"));
+        assert!(canonical.ends_with(content_hash));
+    }
+
+    #[test]
+    fn test_build_canonical_request_with_query() {
+        use axum::http::{Method, Request};
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("https://example.com/test?foo=bar&baz=qux")
+            .header("host", "example.com")
+            .body(Body::empty())
+            .unwrap();
+
+        let signed_headers = vec!["host".to_string()];
+        let content_hash = "UNSIGNED-PAYLOAD";
+
+        let result = build_canonical_request(&request, &signed_headers, content_hash);
+        assert!(result.is_ok());
+
+        let canonical = result.unwrap();
+        // Query parameters should be sorted
+        assert!(canonical.contains("baz=qux&foo=bar"));
+    }
+
+    #[test]
+    fn test_build_canonical_request_post() {
+        use axum::http::{Method, Request};
+
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("https://example.com/object")
+            .header("host", "example.com")
+            .header("content-type", "text/plain")
+            .body(Body::empty())
+            .unwrap();
+
+        let signed_headers = vec!["content-type".to_string(), "host".to_string()];
+        let content_hash = "abc123";
+
+        let result = build_canonical_request(&request, &signed_headers, content_hash);
+        assert!(result.is_ok());
+
+        let canonical = result.unwrap();
+        assert!(canonical.starts_with("POST\n"));
+        assert!(canonical.contains("content-type:text/plain\n"));
+    }
+
+    #[test]
+    fn test_build_canonical_request_empty_query() {
+        use axum::http::{Method, Request};
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("https://example.com/test")
+            .header("host", "example.com")
+            .body(Body::empty())
+            .unwrap();
+
+        let signed_headers = vec!["host".to_string()];
+        let content_hash = "HASH";
+
+        let result = build_canonical_request(&request, &signed_headers, content_hash);
+        assert!(result.is_ok());
+
+        let canonical = result.unwrap();
+        // Should have empty query string section
+        assert!(canonical.contains("/test\n\n")); // URI followed by empty query
+    }
+
+    #[test]
+    fn test_verify_signature_missing_date_header() {
+        use axum::http::{Method, Request};
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("https://example.com/test")
+            .header("host", "example.com")
+            .body(Body::empty())
+            .unwrap();
+
+        let auth_info = AuthorizationInfo {
+            access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
+            credential_scope: "20240101/us-east-1/s3/aws4_request".to_string(),
+            signed_headers: vec!["host".to_string()],
+            signature: "abc123".to_string(),
+        };
+
+        let credentials = Credentials {
+            _access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+        };
+
+        let result = verify_signature(&request, &auth_info, &credentials);
+        assert!(matches!(result, Err(S3Error::InvalidRequest(_))));
+    }
+
+    #[test]
+    fn test_verify_signature_missing_content_hash() {
+        use axum::http::{Method, Request};
+        use chrono::Utc;
+
+        let now = Utc::now();
+        let timestamp = now.format("%Y%m%dT%H%M%SZ").to_string();
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("https://example.com/test")
+            .header("host", "example.com")
+            .header("x-amz-date", &timestamp)
+            .body(Body::empty())
+            .unwrap();
+
+        let auth_info = AuthorizationInfo {
+            access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
+            credential_scope: format!("{}/us-east-1/s3/aws4_request", &timestamp[..8]),
+            signed_headers: vec!["host".to_string(), "x-amz-date".to_string()],
+            signature: "abc123".to_string(),
+        };
+
+        let credentials = Credentials {
+            _access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+        };
+
+        let result = verify_signature(&request, &auth_info, &credentials);
+        assert!(matches!(result, Err(S3Error::InvalidRequest(_))));
+    }
+
+    #[test]
+    fn test_verify_signature_invalid_signature() {
+        use axum::http::{Method, Request};
+        use chrono::Utc;
+
+        let now = Utc::now();
+        let timestamp = now.format("%Y%m%dT%H%M%SZ").to_string();
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("https://example.com/test")
+            .header("host", "example.com")
+            .header("x-amz-date", &timestamp)
+            .header("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
+            .body(Body::empty())
+            .unwrap();
+
+        let auth_info = AuthorizationInfo {
+            access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
+            credential_scope: format!("{}/us-east-1/s3/aws4_request", &timestamp[..8]),
+            signed_headers: vec!["host".to_string(), "x-amz-date".to_string()],
+            signature: "invalidsignature123".to_string(),
+        };
+
+        let credentials = Credentials {
+            _access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+        };
+
+        let result = verify_signature(&request, &auth_info, &credentials);
+        // Should fail because signature doesn't match
+        assert!(matches!(result, Err(S3Error::SignatureDoesNotMatch)));
+    }
+
+    #[test]
+    fn test_verify_signature_expired_timestamp() {
+        use axum::http::{Method, Request};
+
+        // Timestamp from 30 minutes ago (beyond 15 minute tolerance)
+        let old_timestamp = "20200101T000000Z";
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("https://example.com/test")
+            .header("host", "example.com")
+            .header("x-amz-date", old_timestamp)
+            .header("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
+            .body(Body::empty())
+            .unwrap();
+
+        let auth_info = AuthorizationInfo {
+            access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
+            credential_scope: "20200101/us-east-1/s3/aws4_request".to_string(),
+            signed_headers: vec!["host".to_string(), "x-amz-date".to_string()],
+            signature: "abc123".to_string(),
+        };
+
+        let credentials = Credentials {
+            _access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+        };
+
+        let result = verify_signature(&request, &auth_info, &credentials);
+        // Should fail due to timestamp validation
+        assert!(matches!(result, Err(S3Error::InvalidRequest(_))));
+    }
 }
