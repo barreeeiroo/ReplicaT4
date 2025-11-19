@@ -8,7 +8,7 @@ mod types;
 use app_state::AppState;
 use auth::{CredentialsStore, auth_middleware};
 use config::{BackendConfig, Config};
-use handlers::{delete_object, get_object, head_object, list_objects, not_found, put_object};
+use handlers::{delete_object, get_object, head_bucket, head_object, list_objects, not_found, put_object};
 use storage::{InMemoryStorage, S3Backend, StorageBackend};
 use types::Credentials;
 
@@ -164,6 +164,7 @@ async fn main() {
 
     // Build router with S3 API endpoints using the bucket name as a constant path
     let bucket_path = format!("/{}", bucket_name);
+    let bucket_path_with_slash = format!("/{}/", bucket_name);
     let object_path = format!("/{}/{{*key}}", bucket_name);
 
     let app = Router::new()
@@ -175,8 +176,9 @@ async fn main() {
                 .delete(delete_object)
                 .head(head_object),
         )
-        // List objects: /{bucket_name}
-        .route(&bucket_path, get(list_objects))
+        // Bucket operations: /{bucket_name} and /{bucket_name}/
+        .route(&bucket_path, get(list_objects).head(head_bucket))
+        .route(&bucket_path_with_slash, get(list_objects).head(head_bucket))
         // Fallback for 404 Not Found
         .fallback(not_found)
         // Add shared state

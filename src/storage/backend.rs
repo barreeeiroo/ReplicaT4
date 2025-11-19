@@ -20,4 +20,7 @@ pub trait StorageBackend: Send + Sync {
         prefix: Option<&str>,
         max_keys: i32,
     ) -> Result<Vec<ObjectMetadata>, S3Error>;
+
+    /// Check if bucket exists and user has access to it
+    async fn head_bucket(&self) -> Result<(), S3Error>;
 }

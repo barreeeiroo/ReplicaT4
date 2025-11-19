@@ -281,4 +281,26 @@ impl StorageBackend for S3Backend {
             }
         }
     }
+
+    async fn head_bucket(&self) -> Result<(), S3Error> {
+        tracing::debug!("[{}] Checking bucket existence: {}", self.name, self.bucket);
+
+        let result = self
+            .client
+            .head_bucket()
+            .bucket(&self.bucket)
+            .send()
+            .await;
+
+        match result {
+            Ok(_) => {
+                tracing::debug!("[{}] Bucket exists and is accessible", self.name);
+                Ok(())
+            }
+            Err(err) => {
+                tracing::warn!("[{}] Bucket not found or not accessible: {}", self.name, err);
+                Err(S3Error::NoSuchBucket)
+            }
+        }
+    }
 }

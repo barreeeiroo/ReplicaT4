@@ -109,6 +109,11 @@ impl StorageBackend for InMemoryStorage {
 
         Ok(results)
     }
+
+    async fn head_bucket(&self) -> Result<(), S3Error> {
+        // In-memory storage always has the bucket available
+        Ok(())
+    }
 }
 
 #[cfg(test)]
