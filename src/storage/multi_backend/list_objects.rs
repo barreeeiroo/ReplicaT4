@@ -1,5 +1,5 @@
 use super::MultiBackend;
-use crate::types::{error::S3Error, ObjectMetadata};
+use crate::types::{ObjectMetadata, error::S3Error};
 
 impl MultiBackend {
     pub(super) async fn list_objects_impl(
@@ -18,7 +18,7 @@ impl MultiBackend {
 mod tests {
     use super::*;
     use crate::config::{ReadMode, WriteMode};
-    use crate::storage::{backend::StorageBackend, InMemoryStorage};
+    use crate::storage::{InMemoryStorage, backend::StorageBackend};
     use bytes::Bytes;
     use futures::stream;
     use std::sync::Arc;

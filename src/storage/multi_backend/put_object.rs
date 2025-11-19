@@ -114,7 +114,12 @@ impl MultiBackend {
                             etags.push(etag);
                         }
                         Err(e) => {
-                            tracing::error!("Backend {} failed to write object {}: {}", idx, key, e);
+                            tracing::error!(
+                                "Backend {} failed to write object {}: {}",
+                                idx,
+                                key,
+                                e
+                            );
                             // TODO: Implement rollback - delete from successful backends
                             return Err(S3Error::InternalError(format!(
                                 "Backend {} failed in multi sync mode: {}",
@@ -137,7 +142,7 @@ impl MultiBackend {
 mod tests {
     use super::*;
     use crate::config::ReadMode;
-    use crate::storage::{backend::StorageBackend, InMemoryStorage};
+    use crate::storage::{InMemoryStorage, backend::StorageBackend};
     use bytes::Bytes;
     use futures::stream::{self, StreamExt};
 

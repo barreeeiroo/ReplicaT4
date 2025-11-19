@@ -113,10 +113,7 @@ async fn main() {
                 .await
                 {
                     Ok(backend) => {
-                        tracing::info!(
-                            "S3 backend '{}' initialized successfully",
-                            backend_name
-                        );
+                        tracing::info!("S3 backend '{}' initialized successfully", backend_name);
                         backends.push(Arc::new(backend));
                         backend_names.push(backend_name);
                     }
@@ -164,7 +161,10 @@ async fn main() {
                 })
         } else {
             // Default to first backend if no primary specified
-            tracing::info!("No primary backend specified, using first backend '{}' as primary", backend_names[0]);
+            tracing::info!(
+                "No primary backend specified, using first backend '{}' as primary",
+                backend_names[0]
+            );
             0
         };
 

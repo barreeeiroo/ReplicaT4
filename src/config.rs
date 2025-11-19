@@ -441,10 +441,12 @@ mod tests {
         let config = result.unwrap();
         let validation_result = config.validate();
         assert!(validation_result.is_err());
-        assert!(validation_result
-            .unwrap_err()
-            .to_string()
-            .contains("Duplicate backend name"));
+        assert!(
+            validation_result
+                .unwrap_err()
+                .to_string()
+                .contains("Duplicate backend name")
+        );
     }
 
     #[test]
@@ -468,10 +470,12 @@ mod tests {
         let config = result.unwrap();
         let validation_result = config.validate();
         assert!(validation_result.is_err());
-        assert!(validation_result
-            .unwrap_err()
-            .to_string()
-            .contains("not found in backends list"));
+        assert!(
+            validation_result
+                .unwrap_err()
+                .to_string()
+                .contains("not found in backends list")
+        );
     }
 
     #[test]

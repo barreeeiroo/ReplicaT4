@@ -1,6 +1,6 @@
 use super::MultiBackend;
 use crate::config::ReadMode;
-use crate::types::{error::S3Error, ObjectMetadata};
+use crate::types::{ObjectMetadata, error::S3Error};
 
 impl MultiBackend {
     pub(super) async fn head_object_impl(&self, key: &str) -> Result<ObjectMetadata, S3Error> {
@@ -27,7 +27,12 @@ impl MultiBackend {
                     match backend.head_object(key).await {
                         Ok(metadata) => return Ok(metadata),
                         Err(e) => {
-                            tracing::warn!("Fallback backend {} failed for HEAD {}: {}", idx, key, e);
+                            tracing::warn!(
+                                "Fallback backend {} failed for HEAD {}: {}",
+                                idx,
+                                key,
+                                e
+                            );
                         }
                     }
                 }

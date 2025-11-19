@@ -95,7 +95,12 @@ impl MultiBackend {
                             tracing::info!("Backend {} successfully deleted object {}", idx, key);
                         }
                         Err(e) => {
-                            tracing::error!("Backend {} failed to delete object {}: {}", idx, key, e);
+                            tracing::error!(
+                                "Backend {} failed to delete object {}: {}",
+                                idx,
+                                key,
+                                e
+                            );
                             return Err(S3Error::InternalError(format!(
                                 "Backend {} failed to delete in multi sync mode: {}",
                                 idx, e
@@ -115,7 +120,7 @@ impl MultiBackend {
 mod tests {
     use super::*;
     use crate::config::ReadMode;
-    use crate::storage::{backend::StorageBackend, InMemoryStorage};
+    use crate::storage::{InMemoryStorage, backend::StorageBackend};
     use bytes::Bytes;
     use futures::stream;
 
@@ -140,10 +145,7 @@ mod tests {
         let data = Bytes::from("data");
 
         // Put and then delete
-        multi
-            .put_object(key, bytes_to_stream(data))
-            .await
-            .unwrap();
+        multi.put_object(key, bytes_to_stream(data)).await.unwrap();
         multi.delete_object(key).await.unwrap();
 
         // Verify both backends deleted the object

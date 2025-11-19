@@ -1,6 +1,6 @@
 use super::backend::{ObjectStream, StorageBackend};
 use crate::config::{ReadMode, WriteMode};
-use crate::types::{error::S3Error, ObjectMetadata};
+use crate::types::{ObjectMetadata, error::S3Error};
 use bytes::{Bytes, BytesMut};
 use futures::stream::{self, StreamExt};
 use std::sync::Arc;
