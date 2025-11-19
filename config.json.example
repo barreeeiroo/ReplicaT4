@@ -1,5 +1,8 @@
 {
   "virtualBucket": "mybucket",
+  "readMode": "BEST_EFFORT",
+  "writeMode": "CONSISTENT",
+  "primaryBackendName": "aws-s3-primary",
   "backends": [
     {
       "name": "aws-s3-primary",

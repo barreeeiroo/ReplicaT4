@@ -1,11 +1,31 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ReadMode {
+    BestEffort,
+    Consistent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum WriteMode {
+    BestEffort,
+    Consistent,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub virtual_bucket: Option<String>,
+    pub read_mode: ReadMode,
+    pub write_mode: WriteMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_backend_name: Option<String>,
     pub backends: Vec<BackendConfig>,
 }
 
@@ -36,11 +56,46 @@ pub struct MemoryBackendConfig {
     pub name: String,
 }
 
+impl BackendConfig {
+    pub fn name(&self) -> &str {
+        match self {
+            BackendConfig::S3(s3) => &s3.name,
+            BackendConfig::Memory(mem) => &mem.name,
+        }
+    }
+}
+
 impl Config {
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
         let content = fs::read_to_string(path)?;
         let config: Config = serde_json::from_str(&content)?;
+        config.validate()?;
         Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<(), Box<dyn std::error::Error>> {
+        // Check that all backend names are unique
+        let mut seen_names = HashSet::new();
+        for backend in &self.backends {
+            let name = backend.name();
+            if !seen_names.insert(name) {
+                return Err(format!("Duplicate backend name: {}", name).into());
+            }
+        }
+
+        // Check that primaryBackendName, if specified, exists in backends
+        if let Some(primary_name) = &self.primary_backend_name {
+            let exists = self.backends.iter().any(|b| b.name() == primary_name);
+            if !exists {
+                return Err(format!(
+                    "Primary backend name '{}' not found in backends list",
+                    primary_name
+                )
+                .into());
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -60,11 +115,16 @@ mod tests {
                     "region": "us-east-1",
                     "bucket": "my-bucket"
                 }
-            ]
+            ],
+            "readMode": "BEST_EFFORT",
+            "writeMode": "BEST_EFFORT"
         }"#;
 
         let config: Config = serde_json::from_str(json).unwrap();
         assert_eq!(config.backends.len(), 1);
+        assert_eq!(config.read_mode, ReadMode::BestEffort);
+        assert_eq!(config.write_mode, WriteMode::BestEffort);
+        assert!(config.primary_backend_name.is_none());
 
         match &config.backends[0] {
             BackendConfig::S3(s3_config) => {
@@ -94,10 +154,15 @@ mod tests {
                     "access_key_id": "minioadmin",
                     "secret_access_key": "minioadmin"
                 }
-            ]
+            ],
+            "readMode": "CONSISTENT",
+            "writeMode": "CONSISTENT"
         }"#;
 
         let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.read_mode, ReadMode::Consistent);
+        assert_eq!(config.write_mode, WriteMode::Consistent);
+
         match &config.backends[0] {
             BackendConfig::S3(s3_config) => {
                 assert_eq!(s3_config.name, "minio");
@@ -121,7 +186,9 @@ mod tests {
                     "type": "memory",
                     "name": "in-memory"
                 }
-            ]
+            ],
+            "readMode": "BEST_EFFORT",
+            "writeMode": "BEST_EFFORT"
         }"#;
 
         let config: Config = serde_json::from_str(json).unwrap();
@@ -155,11 +222,17 @@ mod tests {
                     "type": "memory",
                     "name": "cache"
                 }
-            ]
+            ],
+            "readMode": "BEST_EFFORT",
+            "writeMode": "CONSISTENT",
+            "primaryBackendName": "aws"
         }"#;
 
         let config: Config = serde_json::from_str(json).unwrap();
         assert_eq!(config.backends.len(), 3);
+        assert_eq!(config.read_mode, ReadMode::BestEffort);
+        assert_eq!(config.write_mode, WriteMode::Consistent);
+        assert_eq!(config.primary_backend_name, Some("aws".to_string()));
 
         assert!(matches!(config.backends[0], BackendConfig::S3(_)));
         assert!(matches!(config.backends[1], BackendConfig::S3(_)));
@@ -169,13 +242,15 @@ mod tests {
     #[test]
     fn test_parse_with_virtual_bucket() {
         let json = r#"{
-            "virtual_bucket": "my-virtual-bucket",
+            "virtualBucket": "my-virtual-bucket",
             "backends": [
                 {
                     "type": "memory",
                     "name": "test"
                 }
-            ]
+            ],
+            "readMode": "BEST_EFFORT",
+            "writeMode": "BEST_EFFORT"
         }"#;
 
         let config: Config = serde_json::from_str(json).unwrap();
@@ -190,7 +265,9 @@ mod tests {
                     "type": "memory",
                     "name": "test"
                 }
-            ]
+            ],
+            "readMode": "BEST_EFFORT",
+            "writeMode": "BEST_EFFORT"
         }"#;
 
         let config: Config = serde_json::from_str(json).unwrap();
@@ -242,7 +319,9 @@ mod tests {
                     "type": "memory",
                     "name": "test"
                 }
-            ]
+            ],
+            "readMode": "BEST_EFFORT",
+            "writeMode": "BEST_EFFORT"
         }"#;
 
         let mut temp_file = NamedTempFile::new().unwrap();
@@ -282,12 +361,17 @@ mod tests {
                 access_key_id: None,
                 secret_access_key: None,
             })],
+            read_mode: ReadMode::BestEffort,
+            write_mode: WriteMode::Consistent,
+            primary_backend_name: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
         let parsed: Config = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed.backends.len(), 1);
+        assert_eq!(parsed.read_mode, ReadMode::BestEffort);
+        assert_eq!(parsed.write_mode, WriteMode::Consistent);
         match &parsed.backends[0] {
             BackendConfig::S3(s3) => {
                 assert_eq!(s3.name, "test");
@@ -310,14 +394,124 @@ mod tests {
                 access_key_id: None,
                 secret_access_key: None,
             })],
+            read_mode: ReadMode::BestEffort,
+            write_mode: WriteMode::BestEffort,
+            primary_backend_name: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
 
         // Optional None fields should not appear in JSON
-        assert!(!json.contains("virtual_bucket"));
+        assert!(!json.contains("virtualBucket"));
         assert!(!json.contains("endpoint"));
         assert!(!json.contains("access_key_id"));
         assert!(!json.contains("secret_access_key"));
+        assert!(!json.contains("primaryBackendName"));
+    }
+
+    #[test]
+    fn test_validate_unique_backend_names() {
+        let json = r#"{
+            "backends": [
+                {
+                    "type": "s3",
+                    "name": "duplicate",
+                    "region": "us-east-1",
+                    "bucket": "bucket1"
+                },
+                {
+                    "type": "s3",
+                    "name": "duplicate",
+                    "region": "us-west-2",
+                    "bucket": "bucket2"
+                }
+            ],
+            "readMode": "BEST_EFFORT",
+            "writeMode": "BEST_EFFORT"
+        }"#;
+
+        let result: Result<Config, _> = serde_json::from_str(json);
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        let validation_result = config.validate();
+        assert!(validation_result.is_err());
+        assert!(validation_result
+            .unwrap_err()
+            .to_string()
+            .contains("Duplicate backend name"));
+    }
+
+    #[test]
+    fn test_validate_primary_backend_exists() {
+        let json = r#"{
+            "backends": [
+                {
+                    "type": "s3",
+                    "name": "backend1",
+                    "region": "us-east-1",
+                    "bucket": "bucket1"
+                }
+            ],
+            "readMode": "BEST_EFFORT",
+            "writeMode": "BEST_EFFORT",
+            "primaryBackendName": "nonexistent"
+        }"#;
+
+        let result: Result<Config, _> = serde_json::from_str(json);
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        let validation_result = config.validate();
+        assert!(validation_result.is_err());
+        assert!(validation_result
+            .unwrap_err()
+            .to_string()
+            .contains("not found in backends list"));
+    }
+
+    #[test]
+    fn test_validate_primary_backend_valid() {
+        let json = r#"{
+            "backends": [
+                {
+                    "type": "s3",
+                    "name": "backend1",
+                    "region": "us-east-1",
+                    "bucket": "bucket1"
+                },
+                {
+                    "type": "s3",
+                    "name": "backend2",
+                    "region": "us-west-2",
+                    "bucket": "bucket2"
+                }
+            ],
+            "readMode": "BEST_EFFORT",
+            "writeMode": "BEST_EFFORT",
+            "primaryBackendName": "backend1"
+        }"#;
+
+        let result: Result<Config, _> = serde_json::from_str(json);
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_backend_config_name() {
+        let s3_backend = BackendConfig::S3(S3BackendConfig {
+            name: "s3-test".to_string(),
+            region: "us-east-1".to_string(),
+            bucket: "bucket".to_string(),
+            endpoint: None,
+            force_path_style: false,
+            access_key_id: None,
+            secret_access_key: None,
+        });
+        assert_eq!(s3_backend.name(), "s3-test");
+
+        let mem_backend = BackendConfig::Memory(MemoryBackendConfig {
+            name: "mem-test".to_string(),
+        });
+        assert_eq!(mem_backend.name(), "mem-test");
     }
 }
