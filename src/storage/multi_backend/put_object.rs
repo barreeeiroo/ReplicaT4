@@ -51,72 +51,6 @@ impl MultiBackend {
         Ok(etag)
     }
 
-    /// Stream a single source to multiple backends concurrently
-    /// Returns (backend_index, result) for each backend
-    async fn broadcast_stream_to_backends(
-        backends: Vec<(usize, Arc<dyn StorageBackend>)>,
-        key: &str,
-        mut stream: ObjectStream,
-    ) -> Result<Vec<(usize, Result<String, S3Error>)>, S3Error> {
-        let num_backends = backends.len();
-
-        // Create a channel for each backend
-        let mut senders = Vec::with_capacity(num_backends);
-        let mut backend_tasks = Vec::with_capacity(num_backends);
-
-        for (idx, backend) in backends {
-            // Create channel with a buffer size of 256 chunks
-            // This provides breathing room for backends with varying upload speeds
-            let (tx, rx) = mpsc::channel::<Result<Bytes, S3Error>>(256);
-            senders.push(tx);
-
-            // Spawn a task for each backend to consume from its channel
-            let key = key.to_string();
-            let task = tokio::spawn(async move {
-                let stream: ObjectStream = Box::pin(ReceiverStream::new(rx));
-                let result = backend.put_object(&key, stream).await;
-                (idx, result)
-            });
-            backend_tasks.push(task);
-        }
-
-        // Read chunks from the incoming stream and broadcast to all backends
-        while let Some(chunk_result) = stream.next().await {
-            match chunk_result {
-                Ok(chunk) => {
-                    // Send the chunk to all backends
-                    // Note: Bytes::clone() is cheap (Arc-based)
-                    for sender in &senders {
-                        if sender.send(Ok(chunk.clone())).await.is_err() {
-                            tracing::warn!("Channel closed while sending chunk");
-                        }
-                    }
-                }
-                Err(e) => {
-                    // Error reading from source stream, propagate to all backends
-                    for sender in &senders {
-                        let _ = sender.send(Err(e.clone())).await;
-                    }
-                    return Err(e);
-                }
-            }
-        }
-
-        // Drop senders to close channels (signal EOF to backend tasks)
-        drop(senders);
-
-        // Wait for all backend tasks and collect results
-        let mut results = Vec::with_capacity(num_backends);
-        for task in backend_tasks {
-            let task_result = task
-                .await
-                .map_err(|e| S3Error::InternalError(format!("Backend task panicked: {}", e)))?;
-            results.push(task_result);
-        }
-
-        Ok(results)
-    }
-
     /// Stream chunks to all backends simultaneously without buffering the entire object
     async fn put_object_multi_sync_streaming(
         &self,
@@ -233,6 +167,72 @@ impl MultiBackend {
                 }
             }
         });
+    }
+
+    /// Stream a single source to multiple backends concurrently
+    /// Returns (backend_index, result) for each backend
+    async fn broadcast_stream_to_backends(
+        backends: Vec<(usize, Arc<dyn StorageBackend>)>,
+        key: &str,
+        mut stream: ObjectStream,
+    ) -> Result<Vec<(usize, Result<String, S3Error>)>, S3Error> {
+        let num_backends = backends.len();
+
+        // Create a channel for each backend
+        let mut senders = Vec::with_capacity(num_backends);
+        let mut backend_tasks = Vec::with_capacity(num_backends);
+
+        for (idx, backend) in backends {
+            // Create channel with a buffer size of 256 chunks
+            // This provides breathing room for backends with varying upload speeds
+            let (tx, rx) = mpsc::channel::<Result<Bytes, S3Error>>(256);
+            senders.push(tx);
+
+            // Spawn a task for each backend to consume from its channel
+            let key = key.to_string();
+            let task = tokio::spawn(async move {
+                let stream: ObjectStream = Box::pin(ReceiverStream::new(rx));
+                let result = backend.put_object(&key, stream).await;
+                (idx, result)
+            });
+            backend_tasks.push(task);
+        }
+
+        // Read chunks from the incoming stream and broadcast to all backends
+        while let Some(chunk_result) = stream.next().await {
+            match chunk_result {
+                Ok(chunk) => {
+                    // Send the chunk to all backends
+                    // Note: Bytes::clone() is cheap (Arc-based)
+                    for sender in &senders {
+                        if sender.send(Ok(chunk.clone())).await.is_err() {
+                            tracing::warn!("Channel closed while sending chunk");
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Error reading from source stream, propagate to all backends
+                    for sender in &senders {
+                        let _ = sender.send(Err(e.clone())).await;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+
+        // Drop senders to close channels (signal EOF to backend tasks)
+        drop(senders);
+
+        // Wait for all backend tasks and collect results
+        let mut results = Vec::with_capacity(num_backends);
+        for task in backend_tasks {
+            let task_result = task
+                .await
+                .map_err(|e| S3Error::InternalError(format!("Backend task panicked: {}", e)))?;
+            results.push(task_result);
+        }
+
+        Ok(results)
     }
 }
 
