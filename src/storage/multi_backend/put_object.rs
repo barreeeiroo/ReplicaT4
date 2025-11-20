@@ -1,26 +1,107 @@
 use super::MultiBackend;
 use crate::config::WriteMode;
+use crate::storage::backend::ObjectStream;
 use crate::types::error::S3Error;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
+use futures::stream::StreamExt;
 use std::sync::Arc;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 
 impl MultiBackend {
     pub(super) async fn put_object_impl(
         &self,
         key: &str,
-        body: super::super::backend::ObjectStream,
+        body: ObjectStream,
     ) -> Result<String, S3Error> {
-        // Collect the stream into memory first (needed for replication)
-        tracing::debug!("PUT object: collecting stream for replication");
-        let data = Self::collect_stream(body).await?;
-        tracing::debug!("PUT object: collected {} bytes", data.len());
-
         match self.write_mode {
-            WriteMode::AsyncReplication => self.put_object_async_replication(key, data).await,
-            WriteMode::MultiSync => self.put_object_multi_sync(key, data).await,
+            WriteMode::AsyncReplication => {
+                // Stream to primary while buffering chunks for background replication
+                tracing::debug!(
+                    "PUT object (async): streaming to primary with background replication"
+                );
+                self.put_object_async_replication_streaming(key, body).await
+            }
+            WriteMode::MultiSync => {
+                // Stream chunks to all backends without full buffering
+                tracing::debug!("PUT object (multi-sync): streaming to all backends");
+                self.put_object_multi_sync_streaming(key, body).await
+            }
         }
     }
 
+    /// Stream to primary while buffering chunks for background replication
+    async fn put_object_async_replication_streaming(
+        &self,
+        key: &str,
+        mut body: ObjectStream,
+    ) -> Result<String, S3Error> {
+        let primary = self.primary();
+        tracing::info!("PUT object (async replication streaming): streaming to primary");
+
+        // Create channel for primary backend
+        let (tx, rx) = mpsc::channel::<Result<Bytes, S3Error>>(32);
+
+        // Spawn task to upload to primary
+        let primary_backend = Arc::clone(primary);
+        let primary_key = key.to_string();
+        let primary_task = tokio::spawn(async move {
+            let stream: ObjectStream = Box::pin(ReceiverStream::new(rx));
+            primary_backend.put_object(&primary_key, stream).await
+        });
+
+        // Buffer for background replication
+        let mut buffered_chunks = Vec::new();
+
+        // Read chunks from stream, send to primary, and buffer for later replication
+        while let Some(chunk_result) = body.next().await {
+            match chunk_result {
+                Ok(chunk) => {
+                    // Send to primary
+                    if tx.send(Ok(chunk.clone())).await.is_err() {
+                        return Err(S3Error::InternalError(
+                            "Primary channel closed unexpectedly".to_string(),
+                        ));
+                    }
+                    // Buffer for background replication
+                    buffered_chunks.push(chunk);
+                }
+                Err(e) => {
+                    // Error reading from source, propagate to primary
+                    let _ = tx.send(Err(e.clone())).await;
+                    return Err(e);
+                }
+            }
+        }
+
+        // Close channel to signal EOF
+        drop(tx);
+
+        // Wait for primary to complete
+        let etag = primary_task
+            .await
+            .map_err(|e| S3Error::InternalError(format!("Primary task panicked: {}", e)))??;
+
+        tracing::info!("Primary backend successfully wrote object {}", key);
+
+        // Combine buffered chunks into Bytes for background replication
+        if !buffered_chunks.is_empty() && self.backends.len() > 1 {
+            let total_size: usize = buffered_chunks.iter().map(|c| c.len()).sum();
+            let mut combined = BytesMut::with_capacity(total_size);
+            for chunk in buffered_chunks {
+                combined.extend_from_slice(&chunk);
+            }
+            let data = combined.freeze();
+
+            // Spawn background tasks to replicate to other backends
+            self.spawn_background_replication_tasks(key, data);
+        }
+
+        Ok(etag)
+    }
+
+    /// Legacy method using full buffering (kept for reference, unused)
+    #[allow(dead_code)]
     async fn put_object_async_replication(
         &self,
         key: &str,
@@ -41,6 +122,97 @@ impl MultiBackend {
         Ok(etag)
     }
 
+    /// Stream chunks to all backends simultaneously without buffering the entire object
+    async fn put_object_multi_sync_streaming(
+        &self,
+        key: &str,
+        mut body: ObjectStream,
+    ) -> Result<String, S3Error> {
+        let num_backends = self.backends.len();
+        tracing::info!(
+            "PUT object (multi sync streaming): streaming to {} backends",
+            num_backends
+        );
+
+        // Create a channel for each backend
+        let mut senders = Vec::with_capacity(num_backends);
+        let mut backend_tasks = Vec::with_capacity(num_backends);
+
+        for (idx, backend) in self.backends.iter().enumerate() {
+            // Create channel with a buffer size (adjust as needed)
+            let (tx, rx) = mpsc::channel::<Result<Bytes, S3Error>>(32);
+            senders.push(tx);
+
+            // Spawn a task for each backend to consume from its channel
+            let backend = Arc::clone(backend);
+            let key = key.to_string();
+            let task = tokio::spawn(async move {
+                // Create a stream from the channel receiver
+                let stream: ObjectStream = Box::pin(ReceiverStream::new(rx));
+                let result = backend.put_object(&key, stream).await;
+                (idx, result)
+            });
+            backend_tasks.push(task);
+        }
+
+        // Read chunks from the incoming stream and broadcast to all backends
+        while let Some(chunk_result) = body.next().await {
+            match chunk_result {
+                Ok(chunk) => {
+                    // Send the chunk to all backends
+                    // Note: Bytes::clone() is cheap (Arc-based), but we still have N references
+                    for sender in &senders {
+                        if sender.send(Ok(chunk.clone())).await.is_err() {
+                            // Channel closed, backend task probably failed
+                            tracing::warn!("Channel closed while sending chunk");
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Error reading from source stream, propagate to all backends
+                    for sender in &senders {
+                        let _ = sender.send(Err(e.clone())).await;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+
+        // Drop senders to close channels (signal EOF to backend tasks)
+        drop(senders);
+
+        // Wait for all backend tasks to complete
+        let mut etags = vec![String::new(); num_backends];
+        for task in backend_tasks {
+            let task_result = task
+                .await
+                .map_err(|e| S3Error::InternalError(format!("Backend task panicked: {}", e)))?;
+            let (idx, result) = task_result;
+
+            match result {
+                Ok(etag) => {
+                    tracing::info!("Backend {} successfully wrote object", idx);
+                    etags[idx] = etag;
+                }
+                Err(e) => {
+                    tracing::error!("Backend {} failed to write object: {}", idx, e);
+                    // TODO: Implement rollback - delete from successful backends
+                    return Err(S3Error::InternalError(format!(
+                        "Backend {} failed in multi sync mode: {}",
+                        idx, e
+                    )));
+                }
+            }
+        }
+
+        tracing::info!("PUT object (multi sync streaming): all backends succeeded");
+
+        // Return primary etag
+        Ok(etags[self.primary_index].clone())
+    }
+
+    /// Legacy method using full buffering (kept for reference, unused)
+    #[allow(dead_code)]
     async fn put_object_multi_sync(&self, key: &str, data: Bytes) -> Result<String, S3Error> {
         // Write to all backends concurrently, all must succeed
         tracing::info!(

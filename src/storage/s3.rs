@@ -246,14 +246,11 @@ impl StorageBackend for S3Backend {
         }
     }
 
-    async fn put_object(
-        &self,
-        key: &str,
-        mut body: crate::storage::backend::ObjectStream,
-    ) -> Result<String, S3Error> {
+    async fn put_object(&self, key: &str, mut body: ObjectStream) -> Result<String, S3Error> {
         tracing::debug!("[{}] Putting object: {}", self.name, key);
 
-        // Collect the streaming body into Bytes
+        // Collect stream into Bytes (in multi-backend mode, this is already a single-chunk
+        // stream created by bytes_to_stream, so this is just extracting the Bytes)
         let mut data = BytesMut::new();
         while let Some(chunk) = body.next().await {
             let chunk = chunk?;
@@ -261,6 +258,7 @@ impl StorageBackend for S3Backend {
         }
         let data = data.freeze();
 
+        // Use ByteStream::from(Bytes) which is zero-copy (just wraps the Arc inside Bytes)
         let body_stream = ByteStream::from(data);
 
         let result = self

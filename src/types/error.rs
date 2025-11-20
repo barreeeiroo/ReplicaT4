@@ -6,7 +6,7 @@ use quick_xml::se::to_string as to_xml_string;
 use serde::Serialize;
 
 /// S3-compatible error responses
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum S3Error {
     NoSuchKey,
     NoSuchBucket,
