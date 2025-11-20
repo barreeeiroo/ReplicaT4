@@ -120,7 +120,7 @@ impl MultiBackend {
     ) -> Result<T, S3Error>
     where
         F: Fn(Arc<dyn StorageBackend>) -> Fut,
-        Fut: std::future::Future<Output = Result<T, S3Error>> + Send + 'static,
+        Fut: Future<Output = Result<T, S3Error>> + Send + 'static,
         T: Send + 'static,
     {
         use futures::future::FutureExt;

@@ -2,15 +2,78 @@ use crate::storage::backend::{ObjectStream, StorageBackend};
 use crate::types::{ObjectMetadata, error::S3Error};
 use aws_sdk_s3::Client as S3Client;
 use aws_sdk_s3::primitives::ByteStream;
-use bytes::BytesMut;
-use futures::stream::StreamExt;
+use bytes::Bytes;
+use futures::stream::{Stream, StreamExt};
+use http_body::{Body, Frame};
 use http_body_util::BodyExt;
 use sha2::{Digest, Sha256};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use tokio::sync::Mutex;
+use tokio_stream::wrappers::ReceiverStream;
 
 pub struct S3Backend {
     client: S3Client,
     bucket: String,
     name: String,
+}
+
+/// Type alias for the receiver stream used in StreamBody
+type StreamReceiver = ReceiverStream<Result<Bytes, Box<dyn std::error::Error + Send + Sync>>>;
+
+/// Adapter to convert ObjectStream into an http_body::Body for ByteStream
+/// Uses a channel-based approach to satisfy the Sync requirement while maintaining streaming
+/// Only buffers up to the channel capacity (256 chunks), not the entire object
+struct StreamBody {
+    receiver: Arc<Mutex<StreamReceiver>>,
+}
+
+impl StreamBody {
+    fn new(mut stream: ObjectStream) -> Self {
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+
+        // Spawn a task to read from the non-Sync stream and forward to the channel
+        tokio::spawn(async move {
+            while let Some(result) = stream.next().await {
+                let mapped_result = result.map_err(|e| {
+                    Box::new(std::io::Error::other(format!("Stream error: {}", e)))
+                        as Box<dyn std::error::Error + Send + Sync>
+                });
+
+                if tx.send(mapped_result).await.is_err() {
+                    // Receiver dropped, stop reading
+                    break;
+                }
+            }
+        });
+
+        Self {
+            receiver: Arc::new(Mutex::new(ReceiverStream::new(rx))),
+        }
+    }
+}
+
+impl Body for StreamBody {
+    type Data = Bytes;
+    type Error = Box<dyn std::error::Error + Send + Sync>;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let mut receiver = match self.receiver.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => return Poll::Pending,
+        };
+
+        match Pin::new(&mut *receiver).poll_next(cx) {
+            Poll::Ready(Some(Ok(bytes))) => Poll::Ready(Some(Ok(Frame::data(bytes)))),
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
 }
 
 impl S3Backend {
@@ -246,20 +309,15 @@ impl StorageBackend for S3Backend {
         }
     }
 
-    async fn put_object(&self, key: &str, mut body: ObjectStream) -> Result<String, S3Error> {
-        tracing::debug!("[{}] Putting object: {}", self.name, key);
+    async fn put_object(&self, key: &str, body: ObjectStream) -> Result<String, S3Error> {
+        tracing::debug!("[{}] Putting object (streaming): {}", self.name, key);
 
-        // Collect stream into Bytes (in multi-backend mode, this is already a single-chunk
-        // stream created by bytes_to_stream, so this is just extracting the Bytes)
-        let mut data = BytesMut::new();
-        while let Some(chunk) = body.next().await {
-            let chunk = chunk?;
-            data.extend_from_slice(&chunk);
-        }
-        let data = data.freeze();
+        // Wrap the stream in our Body adapter for true streaming
+        // Only buffers up to 256 chunks in the channel, not the entire object
+        let stream_body = StreamBody::new(body);
 
-        // Use ByteStream::from(Bytes) which is zero-copy (just wraps the Arc inside Bytes)
-        let body_stream = ByteStream::from(data);
+        // Convert to ByteStream using the Body adapter
+        let body_stream = ByteStream::from_body_1_x(stream_body);
 
         let result = self
             .client

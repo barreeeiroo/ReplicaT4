@@ -68,6 +68,7 @@ impl MultiBackend {
     }
 
     /// Collect a stream into Bytes (needed for replication)
+    #[allow(dead_code)]
     pub(super) async fn collect_stream(mut stream: ObjectStream) -> Result<Bytes, S3Error> {
         let mut data = BytesMut::new();
         while let Some(chunk) = stream.next().await {

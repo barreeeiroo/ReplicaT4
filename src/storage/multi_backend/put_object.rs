@@ -39,8 +39,8 @@ impl MultiBackend {
         let primary = self.primary();
         tracing::info!("PUT object (async replication streaming): streaming to primary");
 
-        // Create channel for primary backend
-        let (tx, rx) = mpsc::channel::<Result<Bytes, S3Error>>(32);
+        // Create channel for primary backend with 256 chunk buffer
+        let (tx, rx) = mpsc::channel::<Result<Bytes, S3Error>>(256);
 
         // Spawn task to upload to primary
         let primary_backend = Arc::clone(primary);
@@ -139,8 +139,9 @@ impl MultiBackend {
         let mut backend_tasks = Vec::with_capacity(num_backends);
 
         for (idx, backend) in self.backends.iter().enumerate() {
-            // Create channel with a buffer size (adjust as needed)
-            let (tx, rx) = mpsc::channel::<Result<Bytes, S3Error>>(32);
+            // Create channel with a buffer size of 256 chunks
+            // This provides breathing room for backends with varying upload speeds
+            let (tx, rx) = mpsc::channel::<Result<Bytes, S3Error>>(256);
             senders.push(tx);
 
             // Spawn a task for each backend to consume from its channel
