@@ -18,6 +18,12 @@ struct StoredObject {
     metadata: ObjectMetadata,
 }
 
+impl Default for InMemoryStorage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InMemoryStorage {
     pub fn new() -> Self {
         Self {

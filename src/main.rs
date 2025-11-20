@@ -5,27 +5,19 @@ mod handlers;
 mod storage;
 mod types;
 
+mod server;
+
 use app_state::AppState;
-use auth::{CredentialsStore, auth_middleware};
+use auth::CredentialsStore;
 use config::{BackendConfig, Config};
-use handlers::{
-    delete_object, get_object, head_bucket, head_object, list_objects, not_found, put_object,
-};
 use storage::{
     InMemoryStorage, MultiBackend, S3Backend, StorageBackend, determine_primary_by_latency,
 };
 use types::Credentials;
 
-use axum::{
-    Router,
-    extract::Request,
-    middleware::{self, Next},
-    routing::get,
-};
 use clap::Parser;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tower_http::trace::TraceLayer;
 
 // Server configuration
 const HOST: &str = "0.0.0.0";
@@ -201,34 +193,8 @@ async fn main() {
     // Create shared app state
     let app_state = AppState::new(storage, credentials_store, bucket_name.clone());
 
-    // Build router with S3 API endpoints using the bucket name as a constant path
-    let bucket_path = format!("/{}", bucket_name);
-    let bucket_path_with_slash = format!("/{}/", bucket_name);
-    let object_path = format!("/{}/{{*key}}", bucket_name);
-
-    let app = Router::new()
-        // Object operations: /{bucket_name}/{key}
-        .route(
-            &object_path,
-            get(get_object)
-                .put(put_object)
-                .delete(delete_object)
-                .head(head_object),
-        )
-        // Bucket operations: /{bucket_name} and /{bucket_name}/
-        .route(&bucket_path, get(list_objects).head(head_bucket))
-        .route(&bucket_path_with_slash, get(list_objects).head(head_bucket))
-        // Fallback for 404 Not Found
-        .fallback(not_found)
-        // Add shared state
-        .with_state(app_state.clone())
-        // Add authentication middleware (captures app_state)
-        .layer(middleware::from_fn(move |request: Request, next: Next| {
-            let state = app_state.clone();
-            async move { auth_middleware(state, request, next).await }
-        }))
-        // Add tracing
-        .layer(TraceLayer::new_for_http());
+    // Create the application router using the shared create_app function
+    let app = server::create_app(app_state, bucket_name.clone());
 
     // Start server
     let addr = format!("{}:{}", cli.host, cli.port);
