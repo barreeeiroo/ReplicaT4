@@ -1,8 +1,6 @@
 use super::backend::{ObjectStream, StorageBackend};
 use crate::config::{ReadMode, WriteMode};
 use crate::types::{ObjectMetadata, error::S3Error};
-use bytes::{Bytes, BytesMut};
-use futures::stream::{self, StreamExt};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -65,22 +63,6 @@ impl MultiBackend {
             .enumerate()
             .filter(move |(idx, _)| *idx != primary_idx)
             .map(|(_, backend)| backend)
-    }
-
-    /// Collect a stream into Bytes (needed for replication)
-    #[allow(dead_code)]
-    pub(super) async fn collect_stream(mut stream: ObjectStream) -> Result<Bytes, S3Error> {
-        let mut data = BytesMut::new();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            data.extend_from_slice(&chunk);
-        }
-        Ok(data.freeze())
-    }
-
-    /// Create a new stream from Bytes
-    pub(super) fn bytes_to_stream(data: Bytes) -> ObjectStream {
-        Box::pin(stream::once(async move { Ok(data) }))
     }
 }
 
