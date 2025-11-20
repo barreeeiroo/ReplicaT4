@@ -34,6 +34,8 @@ pub struct Config {
     pub write_mode: WriteMode,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_backend_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub use_latency_based_primary_backend: Option<bool>,
     pub backends: Vec<BackendConfig>,
 }
 
@@ -89,6 +91,15 @@ impl Config {
             if !seen_names.insert(name) {
                 return Err(format!("Duplicate backend name: {}", name).into());
             }
+        }
+
+        // Check that primaryBackendName and useLatencyBasedPrimaryBackend are mutually exclusive
+        if self.primary_backend_name.is_some()
+            && self.use_latency_based_primary_backend == Some(true)
+        {
+            return Err(
+                "Cannot specify both primaryBackendName and useLatencyBasedPrimaryBackend".into(),
+            );
         }
 
         // Check that primaryBackendName, if specified, exists in backends
@@ -372,6 +383,7 @@ mod tests {
             read_mode: ReadMode::PrimaryFallback,
             write_mode: WriteMode::MultiSync,
             primary_backend_name: None,
+            use_latency_based_primary_backend: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -405,6 +417,7 @@ mod tests {
             read_mode: ReadMode::PrimaryFallback,
             write_mode: WriteMode::AsyncReplication,
             primary_backend_name: None,
+            use_latency_based_primary_backend: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -415,6 +428,7 @@ mod tests {
         assert!(!json.contains("access_key_id"));
         assert!(!json.contains("secret_access_key"));
         assert!(!json.contains("primaryBackendName"));
+        assert!(!json.contains("useLatencyBasedPrimaryBackend"));
     }
 
     #[test]
@@ -525,5 +539,35 @@ mod tests {
             name: "mem-test".to_string(),
         });
         assert_eq!(mem_backend.name(), "mem-test");
+    }
+
+    #[test]
+    fn test_validate_mutually_exclusive_primary_selection() {
+        let json = r#"{
+            "backends": [
+                {
+                    "type": "s3",
+                    "name": "backend1",
+                    "region": "us-east-1",
+                    "bucket": "bucket1"
+                }
+            ],
+            "readMode": "PRIMARY_FALLBACK",
+            "writeMode": "ASYNC_REPLICATION",
+            "primaryBackendName": "backend1",
+            "useLatencyBasedPrimaryBackend": true
+        }"#;
+
+        let result: Result<Config, _> = serde_json::from_str(json);
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        let validation_result = config.validate();
+        assert!(validation_result.is_err());
+        assert!(
+            validation_result
+                .unwrap_err()
+                .to_string()
+                .contains("Cannot specify both")
+        );
     }
 }

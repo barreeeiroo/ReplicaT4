@@ -11,7 +11,9 @@ use config::{BackendConfig, Config};
 use handlers::{
     delete_object, get_object, head_bucket, head_object, list_objects, not_found, put_object,
 };
-use storage::{InMemoryStorage, MultiBackend, S3Backend, StorageBackend};
+use storage::{
+    InMemoryStorage, MultiBackend, S3Backend, StorageBackend, determine_primary_by_latency,
+};
 use types::Credentials;
 
 use axum::{
@@ -146,7 +148,10 @@ async fn main() {
         backends.into_iter().next().unwrap()
     } else {
         // Determine primary backend index
-        let primary_index = if let Some(primary_name) = &config.primary_backend_name {
+        let primary_index = if config.use_latency_based_primary_backend == Some(true) {
+            // Use latency-based primary selection
+            determine_primary_by_latency(&backends, &backend_names).await
+        } else if let Some(primary_name) = &config.primary_backend_name {
             // Find the index of the specified primary backend
             backend_names
                 .iter()

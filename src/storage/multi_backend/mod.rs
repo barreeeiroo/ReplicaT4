@@ -4,6 +4,7 @@ use crate::types::{ObjectMetadata, error::S3Error};
 use bytes::{Bytes, BytesMut};
 use futures::stream::{self, StreamExt};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 mod delete_object;
 mod get_object;
@@ -82,6 +83,133 @@ impl MultiBackend {
     }
 }
 
+/// Determine the best backend based on latency by benchmarking HEAD bucket requests
+///
+/// Issues 10 HEAD bucket requests to each backend and calculates the median (P50) latency.
+/// Returns the index of the backend with the lowest P50 latency.
+///
+/// # Arguments
+/// * `backends` - List of backends to benchmark
+/// * `backend_names` - Names of the backends (for logging)
+///
+/// # Returns
+/// The index of the backend with the best (lowest) P50 latency, or 0 if all backends fail
+pub async fn determine_primary_by_latency(
+    backends: &[Arc<dyn StorageBackend>],
+    backend_names: &[String],
+) -> usize {
+    const BENCHMARK_REQUESTS: usize = 10;
+
+    tracing::info!(
+        "Benchmarking {} backends with {} HEAD bucket requests each...",
+        backends.len(),
+        BENCHMARK_REQUESTS
+    );
+
+    let mut backend_latencies: Vec<(usize, Vec<Duration>)> = Vec::new();
+
+    // Benchmark each backend
+    for (idx, backend) in backends.iter().enumerate() {
+        let mut latencies = Vec::new();
+        let backend_name = &backend_names[idx];
+
+        tracing::debug!("Benchmarking backend '{}' ({})...", backend_name, idx);
+
+        for request_num in 0..BENCHMARK_REQUESTS {
+            let start = Instant::now();
+            match backend.head_bucket().await {
+                Ok(_) => {
+                    let duration = start.elapsed();
+                    latencies.push(duration);
+                    tracing::trace!(
+                        "Backend '{}' request {}/{}: {:?}",
+                        backend_name,
+                        request_num + 1,
+                        BENCHMARK_REQUESTS,
+                        duration
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Backend '{}' failed HEAD bucket request {}/{}: {}",
+                        backend_name,
+                        request_num + 1,
+                        BENCHMARK_REQUESTS,
+                        e
+                    );
+                }
+            }
+        }
+
+        if latencies.is_empty() {
+            tracing::warn!("Backend '{}' failed all benchmark requests", backend_name);
+        } else {
+            tracing::debug!(
+                "Backend '{}' completed {}/{} requests",
+                backend_name,
+                latencies.len(),
+                BENCHMARK_REQUESTS
+            );
+        }
+
+        backend_latencies.push((idx, latencies));
+    }
+
+    // Calculate P50 (median) for each backend
+    let mut backend_p50s: Vec<(usize, Option<Duration>)> = backend_latencies
+        .into_iter()
+        .map(|(idx, mut latencies)| {
+            if latencies.is_empty() {
+                (idx, None)
+            } else {
+                latencies.sort();
+                let p50 = latencies[latencies.len() / 2];
+                (idx, Some(p50))
+            }
+        })
+        .collect();
+
+    // Log P50 results
+    for (idx, p50) in &backend_p50s {
+        match p50 {
+            Some(duration) => tracing::info!(
+                "Backend '{}' P50 latency: {:?}",
+                backend_names[*idx],
+                duration
+            ),
+            None => tracing::warn!(
+                "Backend '{}' has no successful requests",
+                backend_names[*idx]
+            ),
+        }
+    }
+
+    // Find backend with lowest P50
+    backend_p50s.sort_by(|a, b| match (a.1, b.1) {
+        (Some(a_p50), Some(b_p50)) => a_p50.cmp(&b_p50),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+
+    let best_index = backend_p50s[0].0;
+    if let Some(best_p50) = backend_p50s[0].1 {
+        tracing::info!(
+            "Selected backend '{}' as primary based on best P50 latency: {:?}",
+            backend_names[best_index],
+            best_p50
+        );
+    } else {
+        tracing::warn!(
+            "All backends failed benchmarking, defaulting to first backend '{}'",
+            backend_names[0]
+        );
+        return 0;
+    }
+
+    best_index
+}
+
 #[async_trait::async_trait]
 impl StorageBackend for MultiBackend {
     async fn head_bucket(&self) -> Result<(), S3Error> {
@@ -132,5 +260,42 @@ mod tests {
         );
 
         assert_eq!(multi.primary_index, 1);
+    }
+
+    #[tokio::test]
+    async fn test_determine_primary_by_latency() {
+        // Create multiple in-memory backends
+        let backend1 = Arc::new(InMemoryStorage::new()) as Arc<dyn StorageBackend>;
+        let backend2 = Arc::new(InMemoryStorage::new()) as Arc<dyn StorageBackend>;
+        let backend3 = Arc::new(InMemoryStorage::new()) as Arc<dyn StorageBackend>;
+
+        let backends = vec![backend1, backend2, backend3];
+        let backend_names = vec![
+            "backend1".to_string(),
+            "backend2".to_string(),
+            "backend3".to_string(),
+        ];
+
+        // All backends should succeed, so one of them will be selected
+        let primary_index = determine_primary_by_latency(&backends, &backend_names).await;
+
+        // The result should be a valid index (0, 1, or 2)
+        assert!(primary_index < 3);
+    }
+
+    #[tokio::test]
+    async fn test_determine_primary_by_latency_all_backends_succeed() {
+        // Create two in-memory backends
+        let backend1 = Arc::new(InMemoryStorage::new()) as Arc<dyn StorageBackend>;
+        let backend2 = Arc::new(InMemoryStorage::new()) as Arc<dyn StorageBackend>;
+
+        let backends = vec![backend1, backend2];
+        let backend_names = vec!["fast".to_string(), "slow".to_string()];
+
+        // Both backends should succeed, and one will be chosen based on latency
+        let primary_index = determine_primary_by_latency(&backends, &backend_names).await;
+
+        // Should return a valid index
+        assert!(primary_index < 2);
     }
 }
