@@ -3,6 +3,12 @@ name: Docker Build and Push
 on:
   push:
     branches: [ main ]
+    paths:
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'Dockerfile'
+      - '.github/workflows/docker.yml'
     tags:
       - 'v*'
 
