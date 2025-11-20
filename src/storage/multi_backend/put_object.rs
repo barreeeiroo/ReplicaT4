@@ -1,8 +1,8 @@
 use super::MultiBackend;
 use crate::config::WriteMode;
-use crate::storage::backend::ObjectStream;
+use crate::storage::backend::{ObjectStream, StorageBackend};
 use crate::types::error::S3Error;
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use futures::stream::StreamExt;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -30,72 +30,23 @@ impl MultiBackend {
         }
     }
 
-    /// Stream to primary while buffering chunks for background replication
+    /// Stream to primary, then replicate to other backends in background via GET streaming
     async fn put_object_async_replication_streaming(
         &self,
         key: &str,
-        mut body: ObjectStream,
+        body: ObjectStream,
     ) -> Result<String, S3Error> {
         let primary = self.primary();
         tracing::info!("PUT object (async replication streaming): streaming to primary");
 
-        // Create channel for primary backend with 256 chunk buffer
-        let (tx, rx) = mpsc::channel::<Result<Bytes, S3Error>>(256);
-
-        // Spawn task to upload to primary
-        let primary_backend = Arc::clone(primary);
-        let primary_key = key.to_string();
-        let primary_task = tokio::spawn(async move {
-            let stream: ObjectStream = Box::pin(ReceiverStream::new(rx));
-            primary_backend.put_object(&primary_key, stream).await
-        });
-
-        // Buffer for background replication
-        let mut buffered_chunks = Vec::new();
-
-        // Read chunks from stream, send to primary, and buffer for later replication
-        while let Some(chunk_result) = body.next().await {
-            match chunk_result {
-                Ok(chunk) => {
-                    // Send to primary
-                    if tx.send(Ok(chunk.clone())).await.is_err() {
-                        return Err(S3Error::InternalError(
-                            "Primary channel closed unexpectedly".to_string(),
-                        ));
-                    }
-                    // Buffer for background replication
-                    buffered_chunks.push(chunk);
-                }
-                Err(e) => {
-                    // Error reading from source, propagate to primary
-                    let _ = tx.send(Err(e.clone())).await;
-                    return Err(e);
-                }
-            }
-        }
-
-        // Close channel to signal EOF
-        drop(tx);
-
-        // Wait for primary to complete
-        let etag = primary_task
-            .await
-            .map_err(|e| S3Error::InternalError(format!("Primary task panicked: {}", e)))??;
+        // Upload to primary backend (true streaming, no buffering)
+        let etag = primary.put_object(key, body).await?;
 
         tracing::info!("Primary backend successfully wrote object {}", key);
 
-        // Combine buffered chunks into Bytes for background replication
-        if !buffered_chunks.is_empty() && self.backends.len() > 1 {
-            let total_size: usize = buffered_chunks.iter().map(|c| c.len()).sum();
-            let mut combined = BytesMut::with_capacity(total_size);
-            for chunk in buffered_chunks {
-                combined.extend_from_slice(&chunk);
-            }
-            let data = combined.freeze();
-
-            // Spawn background tasks to replicate to other backends
-            self.spawn_background_replication_tasks(key, data);
-        }
+        // Spawn background tasks to replicate to other backends
+        // These will GET from primary and stream to other backends
+        self.spawn_background_replication_tasks_streaming(key);
 
         Ok(etag)
     }
@@ -122,33 +73,28 @@ impl MultiBackend {
         Ok(etag)
     }
 
-    /// Stream chunks to all backends simultaneously without buffering the entire object
-    async fn put_object_multi_sync_streaming(
-        &self,
+    /// Stream a single source to multiple backends concurrently
+    /// Returns (backend_index, result) for each backend
+    async fn broadcast_stream_to_backends(
+        backends: Vec<(usize, Arc<dyn StorageBackend>)>,
         key: &str,
-        mut body: ObjectStream,
-    ) -> Result<String, S3Error> {
-        let num_backends = self.backends.len();
-        tracing::info!(
-            "PUT object (multi sync streaming): streaming to {} backends",
-            num_backends
-        );
+        mut stream: ObjectStream,
+    ) -> Result<Vec<(usize, Result<String, S3Error>)>, S3Error> {
+        let num_backends = backends.len();
 
         // Create a channel for each backend
         let mut senders = Vec::with_capacity(num_backends);
         let mut backend_tasks = Vec::with_capacity(num_backends);
 
-        for (idx, backend) in self.backends.iter().enumerate() {
+        for (idx, backend) in backends {
             // Create channel with a buffer size of 256 chunks
             // This provides breathing room for backends with varying upload speeds
             let (tx, rx) = mpsc::channel::<Result<Bytes, S3Error>>(256);
             senders.push(tx);
 
             // Spawn a task for each backend to consume from its channel
-            let backend = Arc::clone(backend);
             let key = key.to_string();
             let task = tokio::spawn(async move {
-                // Create a stream from the channel receiver
                 let stream: ObjectStream = Box::pin(ReceiverStream::new(rx));
                 let result = backend.put_object(&key, stream).await;
                 (idx, result)
@@ -157,14 +103,13 @@ impl MultiBackend {
         }
 
         // Read chunks from the incoming stream and broadcast to all backends
-        while let Some(chunk_result) = body.next().await {
+        while let Some(chunk_result) = stream.next().await {
             match chunk_result {
                 Ok(chunk) => {
                     // Send the chunk to all backends
-                    // Note: Bytes::clone() is cheap (Arc-based), but we still have N references
+                    // Note: Bytes::clone() is cheap (Arc-based)
                     for sender in &senders {
                         if sender.send(Ok(chunk.clone())).await.is_err() {
-                            // Channel closed, backend task probably failed
                             tracing::warn!("Channel closed while sending chunk");
                         }
                     }
@@ -182,14 +127,42 @@ impl MultiBackend {
         // Drop senders to close channels (signal EOF to backend tasks)
         drop(senders);
 
-        // Wait for all backend tasks to complete
-        let mut etags = vec![String::new(); num_backends];
+        // Wait for all backend tasks and collect results
+        let mut results = Vec::with_capacity(num_backends);
         for task in backend_tasks {
             let task_result = task
                 .await
                 .map_err(|e| S3Error::InternalError(format!("Backend task panicked: {}", e)))?;
-            let (idx, result) = task_result;
+            results.push(task_result);
+        }
 
+        Ok(results)
+    }
+
+    /// Stream chunks to all backends simultaneously without buffering the entire object
+    async fn put_object_multi_sync_streaming(
+        &self,
+        key: &str,
+        body: ObjectStream,
+    ) -> Result<String, S3Error> {
+        let num_backends = self.backends.len();
+        tracing::info!(
+            "PUT object (multi sync streaming): streaming to {} backends",
+            num_backends
+        );
+
+        let backends: Vec<_> = self
+            .backends
+            .iter()
+            .enumerate()
+            .map(|(idx, backend)| (idx, Arc::clone(backend)))
+            .collect();
+
+        let results = Self::broadcast_stream_to_backends(backends, key, body).await?;
+
+        // Check that all backends succeeded
+        let mut etags = vec![String::new(); num_backends];
+        for (idx, result) in results {
             match result {
                 Ok(etag) => {
                     tracing::info!("Backend {} successfully wrote object", idx);
@@ -264,6 +237,80 @@ impl MultiBackend {
         Ok(etags[self.primary_index].clone())
     }
 
+    /// Spawn background task that GETs from primary once and broadcasts to other backends
+    fn spawn_background_replication_tasks_streaming(&self, key: &str) {
+        if self.backends.len() <= 1 {
+            return;
+        }
+
+        let primary_idx = self.primary_index;
+        let primary_backend = Arc::clone(&self.backends[primary_idx]);
+        let other_backends: Vec<_> = self
+            .backends
+            .iter()
+            .enumerate()
+            .filter(move |(idx, _)| *idx != primary_idx)
+            .map(|(idx, backend)| (idx, Arc::clone(backend)))
+            .collect();
+
+        tracing::info!(
+            "Spawning background task to replicate to {} other backends (streaming from primary)",
+            other_backends.len()
+        );
+
+        let key_clone = key.to_string();
+        tokio::spawn(async move {
+            // GET from primary once
+            let (stream, _metadata) = match primary_backend.get_object(&key_clone).await {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::error!(
+                        "Background replication: failed to get object {} from primary: {}",
+                        key_clone,
+                        e
+                    );
+                    return;
+                }
+            };
+
+            // Use shared broadcast function to stream to all other backends
+            match MultiBackend::broadcast_stream_to_backends(other_backends, &key_clone, stream)
+                .await
+            {
+                Ok(results) => {
+                    for (idx, result) in results {
+                        match result {
+                            Ok(_) => {
+                                tracing::info!(
+                                    "Background replication: backend {} successfully wrote object {}",
+                                    idx,
+                                    key_clone
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "Background replication: backend {} failed to write object {}: {}",
+                                    idx,
+                                    key_clone,
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Background replication: failed to broadcast stream for object {}: {}",
+                        key_clone,
+                        e
+                    );
+                }
+            }
+        });
+    }
+
+    /// Legacy method using full buffering (kept for reference, unused)
+    #[allow(dead_code)]
     fn spawn_background_replication_tasks(&self, key: &str, data: Bytes) {
         if self.backends.len() <= 1 {
             return;
