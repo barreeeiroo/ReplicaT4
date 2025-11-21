@@ -161,7 +161,7 @@ graph TB
     end
 ```
 
-With **single-location storage**, a catastrophic failure of one data center means total data loss—there's nowhere else
+With **single-location storage**, a catastrophic failure of one data center means total data loss; there's nowhere else
 to reconstruct from. With **multi-AZ architecture**, your data remains safe even if an entire AZ is destroyed, and
 requires the highly unlikely scenario of simultaneous catastrophic failures across at least 3 different data centers
 in geographically separated locations before data becomes unrecoverable.
