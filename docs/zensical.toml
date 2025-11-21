@@ -38,6 +38,7 @@ Copyright &copy; 2025 Diego Barreiro Perez
 """
 
 repo_name = "barreeeiroo/ReplicaT4"
+repo_url = "https://github.com/barreeeiroo/ReplicaT4"
 
 # Zensical supports both implicit navigation and explicitly defined navigation.
 # If you decide not to define a navigation here then Zensical will simply
@@ -294,9 +295,9 @@ toggle.name = "Switch to light mode"
 # - https://zensical.org/docs/setup/logo-and-icons
 # - https://zensical.org/docs/authoring/icons-emojis/#search
 # ----------------------------------------------------------------------------
-#[project.theme.icon]
+[project.theme.icon]
 #logo = "lucide/smile"
-#repo = "lucide/smile"
+repo = "lucide/github"
 
 # ----------------------------------------------------------------------------
 # The "extra" section contains miscellaneous settings.
