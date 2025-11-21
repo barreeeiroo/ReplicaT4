@@ -212,6 +212,24 @@ def upload_file(file, key):
     s3_client_backup.put_object(bucket='backup', key=key, body=file)
 ```
 
+```mermaid
+graph TB
+    App1[Application<br/>with Replication Logic]
+    style App1 fill:#ffd43b,stroke:#fab005,stroke-width:2px,color:#000
+
+    Backend1A[Backblaze B2]
+    Backend1B[MinIO]
+    Backend1C[Hetzner Storage]
+
+    App1 -->|Write| Backend1A
+    App1 -->|Write| Backend1B
+    App1 -->|Write| Backend1C
+
+    Note1[Application must handle:<br/>• Replication logic<br/>• Error handling<br/>• Consistency]
+    style Note1 fill:#fff,stroke:#fab005,stroke-width:2px
+    App1 -.-> Note1
+```
+
 **Drawbacks:**
 
 - Requires modifying application code
@@ -229,6 +247,28 @@ ReplicaT4 acts as a proxy layer between your application and storage backends:
 s3_client = boto3.client('s3', endpoint_url='http://replicat4:3000')
 s3_client.put_object(bucket='my-bucket', key=key, body=file)
 # ReplicaT4 automatically replicates to all configured backends
+```
+
+```mermaid
+graph TB
+    App2[Application<br/>Standard S3 Client]
+    style App2 fill:#51cf66,stroke:#2f9e44,stroke-width:2px,color:#000
+
+    Proxy[ReplicaT4 Proxy]
+    style Proxy fill:#339af0,stroke:#1864ab,stroke-width:2px,color:#fff
+
+    Backend2A[Backblaze B2]
+    Backend2B[MinIO]
+    Backend2C[Hetzner Storage]
+
+    App2 -->|Standard S3 API| Proxy
+    Proxy -->|Replicate| Backend2A
+    Proxy -->|Replicate| Backend2B
+    Proxy -->|Replicate| Backend2C
+
+    Note2[ReplicaT4 handles:<br/>• Replication logic<br/>• Error handling<br/>• Consistency]
+    style Note2 fill:#fff,stroke:#339af0,stroke-width:2px
+    Proxy -.-> Note2
 ```
 
 **Benefits:**
@@ -251,6 +291,15 @@ ReplicaT4 solves these challenges by providing:
 
 Whether you're using budget providers to reduce costs or implementing a defense-in-depth strategy against vendor
 lock-in, ReplicaT4 enables you to achieve the durability you need without sacrificing flexibility or breaking the bank.
+
+### The Name
+
+The name **ReplicaT4** reflects its architecture and purpose:
+
+- **Replica** - The core function: replicating data across multiple storage backends
+- **T4** - The **4 connections** needed to achieve S3-like resilience:
+    - **1 connection** from your application to the ReplicaT4 proxy
+    - **3 connections** from the proxy to storage backends (mirroring AWS S3's 3-AZ architecture)
 
 
 [^1]: [Reddit Discussion: Did OVH customers lose data that shouldn't have been lost?](https://www.reddit.com/r/webhosting/comments/m8e5so/eli5_did_ovh_customers_lose_data_that_shouldnt/)
