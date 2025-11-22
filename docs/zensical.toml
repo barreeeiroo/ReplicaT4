@@ -47,10 +47,14 @@ repo_url = "https://github.com/barreeeiroo/ReplicaT4"
 # can be defined using TOML syntax.
 #
 # Read more: https://zensical.org/docs/setup/navigation/
-# nav = [
-#   { "Get started" = "index.md" },
-#   { "Markdown in 5min" = "markdown.md" },
-# ]
+nav = [
+    "index.md",
+    "motivation.md",
+    "getting-started.md",
+    "configuration.md",
+    "read-write-modes.md",
+    "usage-examples.md",
+]
 
 # With the "extra_css" option you can add your own CSS styling to customize
 # your Zensical project according to your needs. You can add any number of
