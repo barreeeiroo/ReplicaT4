@@ -17,16 +17,34 @@ depending on vendor-specific capabilities.
 
 ## Features
 
-- **Multi-Backend Replication**: Replicate data across multiple S3-compatible storage backends
-- **Flexible Replication Modes**: Choose between async (fast) and synchronous (consistent) replication
-- **Multiple Read Strategies**: From fast primary-only reads to consistency-verified reads across all backends
-- **Streaming Architecture**: Zero-copy streaming for efficient handling of large objects
-- **S3-Compatible API**: Drop-in replacement for S3-compatible applications
+- **Multi-Backend Replication** - Replicate across any S3-compatible storage (AWS S3, MinIO, Backblaze B2, etc.)
+- **Flexible Write Modes** - Async replication (fast) or multi-sync (consistent)
+- **Smart Read Strategies** - Primary-only, fallback, best-effort, or all-consistent modes
+- **Streaming Architecture** - Zero-copy streaming for efficient large object handling
+- **Drop-in Replacement** - Standard S3 API, no application code changes required
 
-## Getting Started
+## Quick Start
 
-For installation instructions, configuration options, and usage examples, please refer to the
-[documentation](https://diego.barreiro.dev/ReplicaT4/).
+```bash
+# 1. Create config.json with your backends
+# 2. Run with Docker
+docker run -d -p 3000:3000 \
+  -v $(pwd)/config.json:/app/config.json:ro \
+  -e AWS_ACCESS_KEY_ID=MYKEY \
+  -e AWS_SECRET_ACCESS_KEY=MYSECRET \
+  ghcr.io/barreeeiroo/replicat4:latest
+
+# 3. Use standard S3 tools
+aws s3 ls s3://mybucket/ --endpoint-url http://localhost:3000
+```
+
+## Documentation
+
+- **[Getting Started](https://diego.barreiro.dev/ReplicaT4/getting-started/)** - Installation and setup guide
+- **[Motivation](https://diego.barreiro.dev/ReplicaT4/motivation/)** - Why ReplicaT4 exists and the problem it solves
+- **[Configuration](https://diego.barreiro.dev/ReplicaT4/configuration/)** - Complete configuration reference
+- **[Read/Write Modes](https://diego.barreiro.dev/ReplicaT4/read-write-modes/)** - Understanding replication strategies
+- **[Usage Examples](https://diego.barreiro.dev/ReplicaT4/usage-examples/)** - Common usage scenarios
 
 ## Acknowledgments
 
