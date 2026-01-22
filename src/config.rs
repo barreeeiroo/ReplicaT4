@@ -110,7 +110,10 @@ impl Config {
         }
     }
 
-    fn parse_content(content: &str, format: ConfigFormat) -> Result<Self, Box<dyn std::error::Error>> {
+    fn parse_content(
+        content: &str,
+        format: ConfigFormat,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let config: Config = match format {
             ConfigFormat::Json => serde_json::from_str(content)?,
             ConfigFormat::Yaml => serde_yml::from_str(content)?,
@@ -721,10 +724,12 @@ primaryBackendName: minio
     fn test_detect_format_no_extension() {
         let result = Config::detect_format(Path::new("config"));
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("must have an extension"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must have an extension")
+        );
     }
 
     #[test]
