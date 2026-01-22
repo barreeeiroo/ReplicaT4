@@ -1,5 +1,7 @@
 {
   "virtualBucket": "mybucket",
+  "readMode": "PRIMARY_FALLBACK",
+  "writeMode": "ASYNC_REPLICATION",
   "backends": [
     {
       "name": "minio-backend",

@@ -1,0 +1,12 @@
+virtualBucket: mybucket
+readMode: PRIMARY_FALLBACK
+writeMode: ASYNC_REPLICATION
+backends:
+  - name: minio-backend
+    type: s3
+    region: us-east-1
+    bucket: replicat4
+    endpoint: "http://minio:9000"
+    force_path_style: true
+    access_key_id: minioadmin
+    secret_access_key: minioadmin

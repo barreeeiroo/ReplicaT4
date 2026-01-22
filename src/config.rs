@@ -75,11 +75,46 @@ impl BackendConfig {
     }
 }
 
+/// Supported configuration file formats
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigFormat {
+    Json,
+    Yaml,
+}
+
 impl Config {
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
+        let path = path.as_ref();
+        let format = Self::detect_format(path)?;
         let content = fs::read_to_string(path)?;
-        let config: Config = serde_json::from_str(&content)?;
+        let config = Self::parse_content(&content, format)?;
         config.validate()?;
+        Ok(config)
+    }
+
+    fn detect_format(path: &Path) -> Result<ConfigFormat, Box<dyn std::error::Error>> {
+        let extension = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_lowercase());
+
+        match extension.as_deref() {
+            Some("json") => Ok(ConfigFormat::Json),
+            Some("yaml") | Some("yml") => Ok(ConfigFormat::Yaml),
+            Some(ext) => Err(format!(
+                "Unsupported config file extension: '.{}'. Supported: .json, .yaml, .yml",
+                ext
+            )
+            .into()),
+            None => Err("Config file must have an extension (.json, .yaml, or .yml)".into()),
+        }
+    }
+
+    fn parse_content(content: &str, format: ConfigFormat) -> Result<Self, Box<dyn std::error::Error>> {
+        let config: Config = match format {
+            ConfigFormat::Json => serde_json::from_str(content)?,
+            ConfigFormat::Yaml => serde_yml::from_str(content)?,
+        };
         Ok(config)
     }
 
@@ -343,7 +378,7 @@ mod tests {
             "writeMode": "ASYNC_REPLICATION"
         }"#;
 
-        let mut temp_file = NamedTempFile::new().unwrap();
+        let mut temp_file = NamedTempFile::with_suffix(".json").unwrap();
         temp_file.write_all(json.as_bytes()).unwrap();
         temp_file.flush().unwrap();
 
@@ -359,7 +394,7 @@ mod tests {
 
     #[test]
     fn test_from_file_invalid_json() {
-        let mut temp_file = NamedTempFile::new().unwrap();
+        let mut temp_file = NamedTempFile::with_suffix(".json").unwrap();
         temp_file.write_all(b"invalid json").unwrap();
         temp_file.flush().unwrap();
 
@@ -569,5 +604,225 @@ mod tests {
                 .to_string()
                 .contains("Cannot specify both")
         );
+    }
+
+    #[test]
+    fn test_parse_yaml_minimal() {
+        let yaml = r#"
+backends:
+  - type: s3
+    name: aws-s3
+    region: us-east-1
+    bucket: my-bucket
+readMode: PRIMARY_FALLBACK
+writeMode: ASYNC_REPLICATION
+"#;
+
+        let config: Config = serde_yml::from_str(yaml).unwrap();
+        assert_eq!(config.backends.len(), 1);
+        assert_eq!(config.read_mode, ReadMode::PrimaryFallback);
+        assert_eq!(config.write_mode, WriteMode::AsyncReplication);
+        assert!(config.primary_backend_name.is_none());
+
+        match &config.backends[0] {
+            BackendConfig::S3(s3_config) => {
+                assert_eq!(s3_config.name, "aws-s3");
+                assert_eq!(s3_config.region, "us-east-1");
+                assert_eq!(s3_config.bucket, "my-bucket");
+            }
+            _ => panic!("Expected S3 backend"),
+        }
+    }
+
+    #[test]
+    fn test_parse_yaml_full() {
+        let yaml = r#"
+virtualBucket: my-virtual-bucket
+backends:
+  - type: s3
+    name: minio
+    region: us-east-1
+    bucket: my-bucket
+    endpoint: "http://localhost:9000"
+    force_path_style: true
+    access_key_id: minioadmin
+    secret_access_key: minioadmin
+readMode: PRIMARY_ONLY
+writeMode: MULTI_SYNC
+primaryBackendName: minio
+"#;
+
+        let config: Config = serde_yml::from_str(yaml).unwrap();
+        assert_eq!(config.virtual_bucket, Some("my-virtual-bucket".to_string()));
+        assert_eq!(config.read_mode, ReadMode::PrimaryOnly);
+        assert_eq!(config.write_mode, WriteMode::MultiSync);
+        assert_eq!(config.primary_backend_name, Some("minio".to_string()));
+
+        match &config.backends[0] {
+            BackendConfig::S3(s3_config) => {
+                assert_eq!(s3_config.name, "minio");
+                assert_eq!(
+                    s3_config.endpoint,
+                    Some("http://localhost:9000".to_string())
+                );
+                assert!(s3_config.force_path_style);
+                assert_eq!(s3_config.access_key_id, Some("minioadmin".to_string()));
+                assert_eq!(s3_config.secret_access_key, Some("minioadmin".to_string()));
+            }
+            _ => panic!("Expected S3 backend"),
+        }
+    }
+
+    #[test]
+    fn test_detect_format_json() {
+        let result = Config::detect_format(Path::new("config.json"));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), ConfigFormat::Json);
+    }
+
+    #[test]
+    fn test_detect_format_yaml() {
+        let result = Config::detect_format(Path::new("config.yaml"));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), ConfigFormat::Yaml);
+    }
+
+    #[test]
+    fn test_detect_format_yml() {
+        let result = Config::detect_format(Path::new("config.yml"));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), ConfigFormat::Yaml);
+    }
+
+    #[test]
+    fn test_detect_format_case_insensitive() {
+        assert_eq!(
+            Config::detect_format(Path::new("config.JSON")).unwrap(),
+            ConfigFormat::Json
+        );
+        assert_eq!(
+            Config::detect_format(Path::new("config.YAML")).unwrap(),
+            ConfigFormat::Yaml
+        );
+        assert_eq!(
+            Config::detect_format(Path::new("config.YML")).unwrap(),
+            ConfigFormat::Yaml
+        );
+    }
+
+    #[test]
+    fn test_detect_format_unsupported_extension() {
+        let result = Config::detect_format(Path::new("config.toml"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unsupported"));
+    }
+
+    #[test]
+    fn test_detect_format_no_extension() {
+        let result = Config::detect_format(Path::new("config"));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must have an extension"));
+    }
+
+    #[test]
+    fn test_from_file_yaml() {
+        let yaml = r#"
+backends:
+  - type: memory
+    name: test
+readMode: PRIMARY_FALLBACK
+writeMode: ASYNC_REPLICATION
+"#;
+
+        let mut temp_file = NamedTempFile::with_suffix(".yaml").unwrap();
+        temp_file.write_all(yaml.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = Config::from_file(temp_file.path()).unwrap();
+        assert_eq!(config.backends.len(), 1);
+        match &config.backends[0] {
+            BackendConfig::Memory(mem) => {
+                assert_eq!(mem.name, "test");
+            }
+            _ => panic!("Expected Memory backend"),
+        }
+    }
+
+    #[test]
+    fn test_from_file_yml() {
+        let yaml = r#"
+backends:
+  - type: memory
+    name: test
+readMode: PRIMARY_FALLBACK
+writeMode: ASYNC_REPLICATION
+"#;
+
+        let mut temp_file = NamedTempFile::with_suffix(".yml").unwrap();
+        temp_file.write_all(yaml.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = Config::from_file(temp_file.path()).unwrap();
+        assert_eq!(config.backends.len(), 1);
+    }
+
+    #[test]
+    fn test_json_yaml_equivalence() {
+        let json = r#"{
+            "virtualBucket": "test-bucket",
+            "backends": [
+                {
+                    "type": "s3",
+                    "name": "aws",
+                    "region": "us-east-1",
+                    "bucket": "my-bucket",
+                    "endpoint": "http://localhost:9000",
+                    "force_path_style": true
+                }
+            ],
+            "readMode": "PRIMARY_FALLBACK",
+            "writeMode": "ASYNC_REPLICATION",
+            "primaryBackendName": "aws"
+        }"#;
+
+        let yaml = r#"
+virtualBucket: test-bucket
+backends:
+  - type: s3
+    name: aws
+    region: us-east-1
+    bucket: my-bucket
+    endpoint: "http://localhost:9000"
+    force_path_style: true
+readMode: PRIMARY_FALLBACK
+writeMode: ASYNC_REPLICATION
+primaryBackendName: aws
+"#;
+
+        let json_config: Config = serde_json::from_str(json).unwrap();
+        let yaml_config: Config = serde_yml::from_str(yaml).unwrap();
+
+        assert_eq!(json_config.virtual_bucket, yaml_config.virtual_bucket);
+        assert_eq!(json_config.read_mode, yaml_config.read_mode);
+        assert_eq!(json_config.write_mode, yaml_config.write_mode);
+        assert_eq!(
+            json_config.primary_backend_name,
+            yaml_config.primary_backend_name
+        );
+        assert_eq!(json_config.backends.len(), yaml_config.backends.len());
+
+        match (&json_config.backends[0], &yaml_config.backends[0]) {
+            (BackendConfig::S3(json_s3), BackendConfig::S3(yaml_s3)) => {
+                assert_eq!(json_s3.name, yaml_s3.name);
+                assert_eq!(json_s3.region, yaml_s3.region);
+                assert_eq!(json_s3.bucket, yaml_s3.bucket);
+                assert_eq!(json_s3.endpoint, yaml_s3.endpoint);
+                assert_eq!(json_s3.force_path_style, yaml_s3.force_path_style);
+            }
+            _ => panic!("Expected S3 backends"),
+        }
     }
 }

@@ -82,6 +82,51 @@ via the `--config` flag or the `CONFIG_PATH` environment variable.
 replicat4 --config config.json
 ```
 
+### Supported Formats
+
+ReplicaT4 supports both **JSON** and **YAML** configuration file formats. The format is automatically detected based
+on the file extension:
+
+| Extension | Format |
+|-----------|--------|
+| `.json` | JSON |
+| `.yaml` | YAML |
+| `.yml` | YAML |
+
+Extension detection is case-insensitive (e.g., `.JSON`, `.YAML`, `.YML` also work).
+
+=== "JSON"
+    ```json
+    {
+      "virtualBucket": "mybucket",
+      "backends": [
+        {
+          "name": "aws-s3",
+          "type": "s3",
+          "region": "us-east-1",
+          "bucket": "my-bucket"
+        }
+      ],
+      "readMode": "PRIMARY_FALLBACK",
+      "writeMode": "ASYNC_REPLICATION"
+    }
+    ```
+
+=== "YAML"
+    ```yaml
+    virtualBucket: mybucket
+    backends:
+      - name: aws-s3
+        type: s3
+        region: us-east-1
+        bucket: my-bucket
+    readMode: PRIMARY_FALLBACK
+    writeMode: ASYNC_REPLICATION
+    ```
+
+Both formats support the exact same configuration options. YAML can be more readable for complex configurations due to
+its less verbose syntax.
+
 ### `virtualBucket`
 
 **Type**: `string` (optional)
